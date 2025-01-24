@@ -3,20 +3,23 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+#include "utils/assert.hh"
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/classification.hpp>
-#include <json/json.h>
-
 #include <boost/range/irange.hpp>
+#include <json/json.h>
+#include <fmt/ranges.h>
+
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/alternator_test_env.hh"
 #include "test/perf/perf.hh"
 #include <seastar/core/app-template.hh>
 #include <seastar/testing/test_runner.hh>
 #include "test/lib/random_utils.hh"
+#include "db/config.hh"
 
 #include "db/config.hh"
 #include "schema/schema_builder.hh"
@@ -383,7 +386,7 @@ static std::vector<perf_result> do_alternator_test(std::string isolation_level,
         sharded<service::migration_manager>& mm,
         sharded<gms::gossiper>& gossiper,
         test_config& cfg) {
-    assert(cfg.frontend == test_config::frontend_type::alternator);
+    SCYLLA_ASSERT(cfg.frontend == test_config::frontend_type::alternator);
     std::cout << "Running test with config: " << cfg << std::endl;
 
     alternator_test_env env(gossiper, qp.local().proxy().container(), mm, qp);
@@ -416,7 +419,7 @@ static std::vector<perf_result> do_alternator_test(std::string isolation_level,
 }
 
 static std::vector<perf_result> do_cql_test(cql_test_env& env, test_config& cfg) {
-    assert(cfg.frontend == test_config::frontend_type::cql);
+    SCYLLA_ASSERT(cfg.frontend == test_config::frontend_type::cql);
 
     std::cout << "Running test with config: " << cfg << std::endl;
     env.create_table([&cfg] (auto ks_name) {
@@ -454,7 +457,7 @@ static std::vector<perf_result> do_cql_test(cql_test_env& env, test_config& cfg)
     abort();
 }
 
-void write_json_result(std::string result_file, const test_config& cfg, perf_result median, double mad, double max, double min) {
+void write_json_result(std::string result_file, const test_config& cfg, const aggregated_perf_results& agg) {
     Json::Value results;
 
     Json::Value params;
@@ -469,13 +472,17 @@ void write_json_result(std::string result_file, const test_config& cfg, perf_res
     results["parameters"] = std::move(params);
 
     Json::Value stats;
-    stats["median tps"] = median.throughput;
-    stats["allocs_per_op"] = median.mallocs_per_op;
-    stats["tasks_per_op"] = median.tasks_per_op;
-    stats["instructions_per_op"] = median.instructions_per_op;
-    stats["mad tps"] = mad;
-    stats["max tps"] = max;
-    stats["min tps"] = min;
+    auto med = agg.median_by_throughput;
+    stats["median tps"] = med.throughput;
+    stats["allocs_per_op"] = med.mallocs_per_op;
+    stats["logallocs_per_op"] = med.logallocs_per_op;
+    stats["tasks_per_op"] = med.tasks_per_op;
+    stats["instructions_per_op"] = med.instructions_per_op;
+    stats["cpu_cycles_per_op"] = med.cpu_cycles_per_op;
+    const auto& tps = agg.stats.at("throughput");
+    stats["mad tps"] = tps.median_absolute_deviation;
+    stats["max tps"] = tps.max;
+    stats["min tps"] = tps.min;
     results["stats"] = std::move(stats);
 
     std::string test_type;
@@ -515,6 +522,15 @@ void write_json_result(std::string result_file, const test_config& cfg, perf_res
     out << results;
 }
 
+/// If app configuration contains the named parameter, store its value into \p store.
+static void set_from_cli(const char* name, app_template& app, utils::config_file::named_value<sstring>& store) {
+    const auto& cfg = app.configuration();
+    auto found = cfg.find(name);
+    if (found != cfg.end()) {
+        store(found->second.as<std::string>());
+    }
+}
+
 namespace perf {
 
 int scylla_simple_query_main(int argc, char** argv) {
@@ -540,6 +556,10 @@ int scylla_simple_query_main(int argc, char** argv) {
         ("stop-on-error", bpo::value<bool>()->default_value(true), "stop after encountering the first error")
         ("timeout", bpo::value<std::string>()->default_value(""), "use timeout")
         ("bypass-cache", "use bypass cache when querying")
+        ("audit", bpo::value<std::string>(), "value for audit config entry")
+        ("audit-keyspaces", bpo::value<std::string>(), "value for audit_keyspaces config entry")
+        ("audit-tables", bpo::value<std::string>(), "value for audit_tables config entry")
+        ("audit-categories", bpo::value<std::string>(), "value for audit_categories config entry")
         ;
 
     set_abort_on_internal_error(true);
@@ -560,10 +580,13 @@ int scylla_simple_query_main(int argc, char** argv) {
             db_cfg->enable_cache(enable_cache);
             cql_test_config cfg(db_cfg);
             if (app.configuration().contains("tablets")) {
-                cfg.db_config->experimental_features({db::experimental_features_t::feature::TABLETS},
-                                                      db::config::config_source::CommandLine);
+                cfg.db_config->enable_tablets.set(true);
                 cfg.initial_tablets = app.configuration()["initial-tablets"].as<unsigned>();
             }
+            set_from_cli("audit", app, cfg.db_config->audit);
+            set_from_cli("audit-keyspaces", app, cfg.db_config->audit_keyspaces);
+            set_from_cli("audit-tables", app, cfg.db_config->audit_tables);
+            set_from_cli("audit-categories", app, cfg.db_config->audit_categories);
           return do_with_cql_env_thread([&app] (auto&& env) {
             auto cfg = test_config();
             cfg.partitions = app.configuration()["partitions"].as<unsigned>();
@@ -596,27 +619,21 @@ int scylla_simple_query_main(int argc, char** argv) {
             cfg.stop_on_error = app.configuration()["stop-on-error"].as<bool>();
             cfg.timeout = app.configuration()["timeout"].as<std::string>();
             cfg.bypass_cache = app.configuration().contains("bypass-cache");
+            audit::audit::create_audit(env.local_db().get_config(), env.get_shared_token_metadata()).handle_exception([&] (auto&& e) {
+                fmt::print("audit creation failed: {}", e);
+            }).get();
+            audit::audit::start_audit(env.local_db().get_config(), env.qp(), env.migration_manager()).get();
+            auto audit_stop = defer([] {
+                audit::audit::stop_audit().get();
+            });
             auto results = cfg.frontend == test_config::frontend_type::cql
                     ? do_cql_test(env, cfg)
                     : do_alternator_test(app.configuration()["alternator"].as<std::string>(),
                             env.local_client_state(), env.qp(), env.migration_manager(), env.gossiper(), cfg);
-
-            auto compare_throughput = [] (perf_result a, perf_result b) { return a.throughput < b.throughput; };
-            std::sort(results.begin(), results.end(), compare_throughput);
-            auto median_result = results[results.size() / 2];
-            auto median = median_result.throughput;
-            auto min = results[0].throughput;
-            auto max = results[results.size() - 1].throughput;
-            auto absolute_deviations = boost::copy_range<std::vector<double>>(
-                    results
-                    | boost::adaptors::transformed(std::mem_fn(&perf_result::throughput))
-                    | boost::adaptors::transformed([&] (double r) { return abs(r - median); }));
-            std::sort(absolute_deviations.begin(), absolute_deviations.end());
-            auto mad = absolute_deviations[results.size() / 2];
-            std::cout << format("\nmedian {}\nmedian absolute deviation: {:.2f}\nmaximum: {:.2f}\nminimum: {:.2f}\n", median_result, mad, max, min);
-
+            aggregated_perf_results agg(results);
+            std::cout << agg << std::endl;
             if (app.configuration().contains("json-result")) {
-                write_json_result(app.configuration()["json-result"].as<std::string>(), cfg, median_result, mad, max, min);
+                write_json_result(app.configuration()["json-result"].as<std::string>(), cfg, agg);
             }
           }, std::move(cfg));
         });

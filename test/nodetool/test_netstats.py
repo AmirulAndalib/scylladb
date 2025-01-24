@@ -1,10 +1,10 @@
 #
 # Copyright 2024-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
-from rest_api_mock import expected_request
+from test.nodetool.rest_api_mock import expected_request
 from enum import Enum
 
 import pytest
@@ -402,7 +402,7 @@ def test_netstats(nodetool, flag):
     res = nodetool(*args, expected_requests=expected_requests)
 
     _check_output(
-            res,
+            res.stdout,
             human_readable,
             mode,
             streams,

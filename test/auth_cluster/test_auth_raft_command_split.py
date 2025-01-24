@@ -1,14 +1,14 @@
 #
 # Copyright (C) 2024-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
 import asyncio
 from test.pylib.manager_client import ManagerClient
 import pytest
-from test.pylib.rest_client import inject_error, inject_error_one_shot
-from test.pylib.util import read_barrier, unique_name, wait_for_cql_and_get_hosts
+from test.pylib.rest_client import inject_error, read_barrier
+from test.pylib.util import unique_name
 
 
 """
@@ -19,15 +19,14 @@ async def test_auth_raft_command_split(manager: ManagerClient) -> None:
     servers = await manager.servers_add(3)
     cql, hosts = await manager.get_ready_cql(servers)
 
-    initial_perms = await cql.run_async("SELECT * FROM system_auth_v2.role_permissions")
+    initial_perms = await cql.run_async("SELECT * FROM system.role_permissions")
 
     shared_role = "shared_role_" + unique_name()
-    await cql.run_async(f"CREATE ROLE IF NOT EXISTS {shared_role}")
+    await cql.run_async(f"CREATE ROLE {shared_role}")
 
     users = ["user_" + unique_name() for _ in range(30)]
     for user in users:
-        # if not exists due to https://github.com/scylladb/python-driver/issues/296
-        await cql.run_async(f"CREATE ROLE IF NOT EXISTS {user}")
+        await cql.run_async(f"CREATE ROLE {user}")
         await cql.run_async(f"GRANT ALL ON ROLE {shared_role} TO {user}")
 
     # this will trigger cascade of deletes which should be packed
@@ -38,17 +37,17 @@ async def test_auth_raft_command_split(manager: ManagerClient) -> None:
                             'auth_announce_mutations_command_max_size'):
         await cql.run_async(f"DROP ROLE IF EXISTS {shared_role}", execution_profile='whitelist')
 
-    cql, hosts = await manager.get_ready_cql(servers)
+    cql, _ = await manager.get_ready_cql(servers)
 
     # auth reads are eventually consistent so we need to sync all nodes
-    await asyncio.gather(*(read_barrier(cql, host) for host in hosts))
+    await asyncio.gather(*(read_barrier(manager.api, s.ip_addr) for s in servers))
 
     # confirm that deleted shared_role is not attached to any other role
-    assert await cql.run_async(f"SELECT * FROM system_auth_v2.role_permissions WHERE resource = 'role/{shared_role}' ALLOW FILTERING") == []
+    assert await cql.run_async(f"SELECT * FROM system.role_permissions WHERE resource = 'role/{shared_role}' ALLOW FILTERING") == []
 
     # cleanup
     for user in users:
         await cql.run_async(f"DROP ROLE IF EXISTS {user}")
-    await asyncio.gather(*(read_barrier(cql, host) for host in hosts))
-    current_perms = await cql.run_async("SELECT * FROM system_auth_v2.role_permissions")
+    await asyncio.gather(*(read_barrier(manager.api, s.ip_addr) for s in servers))
+    current_perms = await cql.run_async("SELECT * FROM system.role_permissions")
     assert initial_perms == current_perms

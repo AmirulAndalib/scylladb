@@ -1,16 +1,17 @@
 #
 # Copyright (C) 2024-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
 import asyncio
 import time
-from test.pylib.internal_types import ServerInfo
 from test.pylib.manager_client import ManagerClient
 import pytest
 from cassandra.auth import PlainTextAuthProvider
-from test.pylib.util import read_barrier, unique_name, wait_for_cql_and_get_hosts
+from test.pylib.rest_client import read_barrier
+from test.pylib.util import unique_name, wait_for_cql_and_get_hosts
+from test.topology.util import trigger_snapshot
 
 
 """
@@ -26,19 +27,16 @@ async def test_auth_no_quorum(manager: ManagerClient) -> None:
     }
     servers = await manager.servers_add(3, config=config)
 
-    cql = manager.get_cql()
-    hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
-    await manager.servers_see_each_other(servers)
+    cql, _ = await manager.get_ready_cql(servers)
 
     # create users, this is done so that previous auth implementation (with RF=1) fails this test
     # otherwise it could happen that all users are luckily placed on a single node
     roles = ["r" + unique_name() for _ in range(10)]
     for role in roles:
-        # if not exists due to https://github.com/scylladb/python-driver/issues/296
-        await cql.run_async(f"CREATE ROLE IF NOT EXISTS {role} WITH PASSWORD = '{role}' AND LOGIN = true")
+        await cql.run_async(f"CREATE ROLE {role} WITH PASSWORD = '{role}' AND LOGIN = true")
 
     # auth reads are eventually consistent so we need to sync all nodes
-    await asyncio.gather(*(read_barrier(cql, host) for host in hosts))
+    await asyncio.gather(*(read_barrier(manager.api, s.ip_addr) for s in servers))
 
     # check if users are replicated everywhere
     for role in roles:
@@ -57,16 +55,6 @@ async def test_auth_no_quorum(manager: ManagerClient) -> None:
     names = [row.role for row in await manager.get_cql().run_async(f"LIST ROLES", execution_profile='whitelist')]
     assert set(names) == set(roles)
 
-
-async def trigger_snapshot(manager: ManagerClient, server: ServerInfo) -> None:
-    cql = manager.get_cql()
-    host = cql.cluster.metadata.get_host(server.ip_addr)
-    group0_id = (await cql.run_async(
-        "select value from system.scylla_local where key = 'raft_group0_id'",
-        host=host))[0].value
-    await manager.api.client.post(f"/raft/trigger_snapshot/{group0_id}", host=server.ip_addr)
-
-
 """
 Tests raft snapshot transfer of auth data.
 """
@@ -80,8 +68,7 @@ async def test_auth_raft_snapshot_transfer(manager: ManagerClient) -> None:
 
     roles = ["ro" + unique_name() for _ in range(10)]
     for role in roles:
-        # if not exists due to https://github.com/scylladb/python-driver/issues/296
-        await cql.run_async(f"CREATE ROLE IF NOT EXISTS {role}")
+        await cql.run_async(f"CREATE ROLE {role}")
 
     await trigger_snapshot(manager, servers[0])
 

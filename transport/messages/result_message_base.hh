@@ -4,7 +4,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -62,10 +62,6 @@ public:
 
     virtual std::optional<unsigned> move_to_shard() const {
         return std::nullopt;
-    }
-
-    virtual bool is_schema_change() const {
-        return false;
     }
 
     virtual bool is_exception() const {

@@ -36,7 +36,7 @@ private:
     uint64_t _reads_issued = 0;
     uint64_t _reads_finished = 0;
 
-    flat_mutation_reader_v2 make_reader(
+    mutation_reader make_reader(
         seastar::sharded<replica::database>& db,
         replica::column_family& cf,
         read_strategy strategy,
@@ -51,7 +51,7 @@ public:
         schema_ptr s,
         reader_permit permit,
         dht::token_range range,
-        const dht::sharder& remote_sharder,
+        const dht::static_sharder& remote_sharder,
         unsigned remote_shard,
         uint64_t seed,
         read_strategy strategy,
@@ -77,7 +77,7 @@ public:
     void pause();
 };
 
-template <> struct fmt::formatter<repair_reader::read_strategy>  : fmt::formatter<std::string_view> {
+template <> struct fmt::formatter<repair_reader::read_strategy>  : fmt::formatter<string_view> {
     auto format(repair_reader::read_strategy s, fmt::format_context& ctx) const {
         using enum repair_reader::read_strategy;
         std::string_view name = "unknown";
@@ -92,6 +92,6 @@ template <> struct fmt::formatter<repair_reader::read_strategy>  : fmt::formatte
                 name = "multishard_filter";
                 break;
         };
-        return formatter<std::string_view>::format(name, ctx);
+        return formatter<string_view>::format(name, ctx);
     }
 };

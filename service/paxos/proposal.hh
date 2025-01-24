@@ -4,7 +4,7 @@
  * Modified by ScyllaDB
  */
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 #pragma once
 
@@ -50,15 +50,6 @@ inline bool operator>(const proposal& lhs, const proposal& rhs) {
 } // end of namespace "service"
 
 // Used for logging and debugging.
-template <> struct fmt::formatter<service::paxos::proposal> : fmt::formatter<std::string_view> {
+template <> struct fmt::formatter<service::paxos::proposal> : fmt::formatter<string_view> {
     auto format(const service::paxos::proposal&, fmt::format_context& ctx) const -> decltype(ctx.out());
 };
-
-namespace service::paxos {
-
-static inline std::ostream& operator<<(std::ostream& os, const proposal& proposal) {
-    fmt::print(os, "{}", proposal);
-    return os;
-}
-
-}

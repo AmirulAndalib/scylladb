@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "mutation_writer/token_group_based_splitting_writer.hh"
@@ -98,7 +98,7 @@ public:
     }
 };
 
-future<> segregate_by_token_group(flat_mutation_reader_v2 producer, classify_by_token_group classify, reader_consumer_v2 consumer) {
+future<> segregate_by_token_group(mutation_reader producer, classify_by_token_group classify, reader_consumer_v2 consumer) {
     auto schema = producer.schema();
     auto permit = producer.permit();
     return feed_writer(

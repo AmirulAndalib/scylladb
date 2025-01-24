@@ -3,10 +3,12 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <boost/range/algorithm/min_element.hpp>
+#include <boost/range/numeric.hpp>
+#include <seastar/coroutine/maybe_yield.hh>
 #include <seastar/coroutine/parallel_for_each.hh>
 
 #include "compaction/task_manager_module.hh"
@@ -16,7 +18,6 @@
 #include "sstables/sstable_directory.hh"
 #include "utils/error_injection.hh"
 #include "utils/pretty_printers.hh"
-#include "db/config.hh"
 
 using namespace std::chrono_literals;
 
@@ -131,7 +132,7 @@ distribute_reshard_jobs(sstables::sstable_directory::sstable_open_info_vector so
 // A creator function must be passed that will create an SSTable object in the correct shard,
 // and an I/O priority must be specified.
 future<> reshard(sstables::sstable_directory& dir, sstables::sstable_directory::sstable_open_info_vector shared_info, replica::table& table,
-                           sstables::compaction_sstable_creator_fn creator, compaction::owned_ranges_ptr owned_ranges_ptr, std::optional<tasks::task_info> parent_info)
+                           sstables::compaction_sstable_creator_fn creator, compaction::owned_ranges_ptr owned_ranges_ptr, tasks::task_info parent_info)
 {
     // Resharding doesn't like empty sstable sets, so bail early. There is nothing
     // to reshard in this shard.
@@ -159,9 +160,9 @@ future<> reshard(sstables::sstable_directory& dir, sstables::sstable_directory::
     // There is a semaphore inside the compaction manager in run_resharding_jobs. So we
     // parallel_for_each so the statistics about pending jobs are updated to reflect all
     // jobs. But only one will run in parallel at a time
-    auto& t = table.as_table_state();
+    auto& t = table.try_get_table_state_with_static_sharding();
     co_await coroutine::parallel_for_each(buckets, [&] (std::vector<sstables::shared_sstable>& sstlist) mutable {
-        return table.get_compaction_manager().run_custom_job(table.as_table_state(), sstables::compaction_type::Reshard, "Reshard compaction", [&] (sstables::compaction_data& info, sstables::compaction_progress_monitor& progress_monitor) -> future<> {
+        return table.get_compaction_manager().run_custom_job(t, sstables::compaction_type::Reshard, "Reshard compaction", [&] (sstables::compaction_data& info, sstables::compaction_progress_monitor& progress_monitor) -> future<> {
             auto erm = table.get_effective_replication_map(); // keep alive around compaction.
 
             sstables::compaction_descriptor desc(sstlist);
@@ -330,24 +331,36 @@ tasks::is_abortable compaction_task_impl::is_abortable() const noexcept {
     return tasks::is_abortable{!_parent_id};
 }
 
-static future<bool> maybe_flush_all_tables(sharded<replica::database>& db) {
-    auto interval = db.local().get_config().compaction_flush_all_tables_before_major_seconds();
-    if (interval) {
-        auto when = db_clock::now() - interval * 1s;
-        if (co_await replica::database::get_all_tables_flushed_at(db) <= when) {
-            co_await db.invoke_on_all([&] (replica::database& db) -> future<> {
-                co_await db.flush_all_tables();
-            });
-            co_return true;
+static future<bool> maybe_flush_commitlog(sharded<replica::database>& db, bool force_flush) {
+    // flush commitlog if
+    // (a) force_flush == true (or)
+    // (b) flush_all_tables_before_major > 0s and the configured seconds have elapsed since last all tables flush
+    if (!force_flush) {
+        auto interval = db.local().get_compaction_manager().flush_all_tables_before_major();
+        if (interval <= 0s) {
+            co_return false;
+        }
+
+        auto when = db_clock::now() - interval;
+        if (co_await replica::database::get_all_tables_flushed_at(db) > when) {
+            co_return false;
         }
     }
-    co_return false;
+
+    co_await db.invoke_on_all([&] (replica::database& db) -> future<> {
+        co_await db.flush_commitlog();
+    });
+    co_return true;
+}
+
+tasks::is_user_task global_major_compaction_task_impl::is_user_task() const noexcept {
+    return tasks::is_user_task::yes;
 }
 
 future<> global_major_compaction_task_impl::run() {
     bool flushed_all_tables = false;
     if (_flush_mode == flush_mode::all_tables) {
-        flushed_all_tables = co_await maybe_flush_all_tables(_db);
+        flushed_all_tables = co_await maybe_flush_commitlog(_db, _consider_only_existing_data);
     }
 
     std::unordered_map<sstring, std::vector<table_info>> tables_by_keyspace;
@@ -364,15 +377,18 @@ future<> global_major_compaction_task_impl::run() {
     flush_mode fm = flushed_all_tables ? flush_mode::skip : _flush_mode;
     for (auto& [ks, table_infos] : tables_by_keyspace) {
         auto task = co_await _module->make_and_start_task<major_keyspace_compaction_task_impl>(parent_info, ks, parent_info.id, _db, table_infos, fm,
-                &cv, &current_task);
+                _consider_only_existing_data, &cv, &current_task);
         keyspace_tasks.emplace_back(std::move(task), ks, std::move(table_infos));
     }
     co_await run_keyspace_tasks(_db.local(), keyspace_tasks, cv, current_task, false);
 }
 
+tasks::is_user_task major_keyspace_compaction_task_impl::is_user_task() const noexcept {
+    return tasks::is_user_task{!_parent_id};
+}
+
 future<> major_keyspace_compaction_task_impl::run() {
-    co_await utils::get_local_injector().inject("compaction_major_keyspace_compaction_task_impl_run",
-            [] (auto& handler) { return handler.wait_for_message(db::timeout_clock::now() + 10s); });
+    co_await utils::get_local_injector().inject("compaction_major_keyspace_compaction_task_impl_run", utils::wait_for_message(10s));
 
     if (_cv) {
         co_await wait_for_your_turn(*_cv, *_current_task, _status.id);
@@ -380,14 +396,14 @@ future<> major_keyspace_compaction_task_impl::run() {
 
     bool flushed_all_tables = false;
     if (_flush_mode == flush_mode::all_tables) {
-        flushed_all_tables = co_await maybe_flush_all_tables(_db);
+        flushed_all_tables = co_await maybe_flush_commitlog(_db, _consider_only_existing_data);
     }
 
     flush_mode fm = flushed_all_tables ? flush_mode::skip : _flush_mode;
     co_await _db.invoke_on_all([&] (replica::database& db) -> future<> {
         tasks::task_info parent_info{_status.id, _status.shard};
         auto& module = db.get_compaction_manager().get_task_manager_module();
-        auto task = co_await module.make_and_start_task<shard_major_keyspace_compaction_task_impl>(parent_info, _status.keyspace, _status.id, db, _table_infos, fm);
+        auto task = co_await module.make_and_start_task<shard_major_keyspace_compaction_task_impl>(parent_info, _status.keyspace, _status.id, db, _table_infos, fm, _consider_only_existing_data);
         co_await task->done();
     });
 }
@@ -398,7 +414,7 @@ future<> shard_major_keyspace_compaction_task_impl::run() {
     tasks::task_info parent_info{_status.id, _status.shard};
     std::vector<table_tasks_info> table_tasks;
     for (auto& ti : _local_tables) {
-        table_tasks.emplace_back(co_await _module->make_and_start_task<table_major_keyspace_compaction_task_impl>(parent_info, _status.keyspace, ti.name, _status.id, _db, ti, cv, current_task, _flush_mode), ti);
+        table_tasks.emplace_back(co_await _module->make_and_start_task<table_major_keyspace_compaction_task_impl>(parent_info, _status.keyspace, ti.name, _status.id, _db, ti, cv, current_task, _flush_mode, _consider_only_existing_data), ti);
     }
 
     co_await run_table_tasks(_db, std::move(table_tasks), cv, current_task, true);
@@ -408,9 +424,13 @@ future<> table_major_keyspace_compaction_task_impl::run() {
     co_await wait_for_your_turn(_cv, _current_task, _status.id);
     tasks::task_info info{_status.id, _status.shard};
     replica::table::do_flush do_flush(_flush_mode != flush_mode::skip);
-    co_await run_on_table("force_keyspace_compaction", _db, _status.keyspace, _ti, [info, do_flush] (replica::table& t) {
-        return t.compact_all_sstables(info, do_flush);
+    co_await run_on_table("force_keyspace_compaction", _db, _status.keyspace, _ti, [info, do_flush, consider_only_existing_data = _consider_only_existing_data] (replica::table& t) {
+        return t.compact_all_sstables(info, do_flush, consider_only_existing_data);
     });
+}
+
+tasks::is_user_task cleanup_keyspace_compaction_task_impl::is_user_task() const noexcept {
+    return _is_user_task;
 }
 
 future<> cleanup_keyspace_compaction_task_impl::run() {
@@ -422,6 +442,10 @@ future<> cleanup_keyspace_compaction_task_impl::run() {
         auto task = co_await module.make_and_start_task<shard_cleanup_keyspace_compaction_task_impl>({_status.id, _status.shard}, _status.keyspace, _status.id, db, _table_infos);
         co_await task->done();
     });
+}
+
+tasks::is_user_task global_cleanup_compaction_task_impl::is_user_task() const noexcept {
+    return tasks::is_user_task::yes;
 }
 
 future<> global_cleanup_compaction_task_impl::run() {
@@ -467,11 +491,24 @@ future<> shard_cleanup_keyspace_compaction_task_impl::run() {
 
 future<> table_cleanup_keyspace_compaction_task_impl::run() {
     co_await wait_for_your_turn(_cv, _current_task, _status.id);
-    auto owned_ranges_ptr = compaction::make_owned_ranges_ptr(_db.get_keyspace_local_ranges(_status.keyspace));
+    // Note that we do not hold an effective_replication_map_ptr throughout
+    // the cleanup operation, so the topology might change.
+    // Since clenaup is an admin operation required for vnodes,
+    // it is the responsibility of the system operator to not
+    // perform additional incompatible range movements during cleanup.
+    auto get_owned_ranges = [&] (std::string_view ks_name) -> future<owned_ranges_ptr> {
+        const auto& erm = _db.find_keyspace(ks_name).get_vnode_effective_replication_map();
+        co_return compaction::make_owned_ranges_ptr(co_await _db.get_keyspace_local_ranges(erm));
+    };
+    auto owned_ranges_ptr = co_await get_owned_ranges(_status.keyspace);
     co_await run_on_table("force_keyspace_cleanup", _db, _status.keyspace, _ti, [&] (replica::table& t) {
         // skip the flush, as cleanup_keyspace_compaction_task_impl::run should have done this.
         return t.perform_cleanup_compaction(owned_ranges_ptr, tasks::task_info{_status.id, _status.shard}, replica::table::do_flush::no);
     });
+}
+
+tasks::is_user_task offstrategy_keyspace_compaction_task_impl::is_user_task() const noexcept {
+    return tasks::is_user_task::yes;
 }
 
 future<> offstrategy_keyspace_compaction_task_impl::run() {
@@ -508,6 +545,10 @@ future<> table_offstrategy_keyspace_compaction_task_impl::run() {
     });
 }
 
+tasks::is_user_task upgrade_sstables_compaction_task_impl::is_user_task() const noexcept {
+    return tasks::is_user_task::yes;
+}
+
 future<> upgrade_sstables_compaction_task_impl::run() {
     co_await _db.invoke_on_all([&] (replica::database& db) -> future<> {
         tasks::task_info parent_info{_status.id, _status.shard};
@@ -531,14 +572,25 @@ future<> shard_upgrade_sstables_compaction_task_impl::run() {
 
 future<> table_upgrade_sstables_compaction_task_impl::run() {
     co_await wait_for_your_turn(_cv, _current_task, _status.id);
-    auto owned_ranges = _db.maybe_get_keyspace_local_ranges(_status.keyspace);
-    auto owned_ranges_ptr = owned_ranges ? compaction::make_owned_ranges_ptr(std::move(owned_ranges.value())) : nullptr;
+    auto get_owned_ranges = [&] (std::string_view keyspace_name) -> future<owned_ranges_ptr> {
+        const auto& ks = _db.find_keyspace(keyspace_name);
+        if (ks.get_replication_strategy().is_per_table()) {
+            co_return nullptr;
+        }
+        const auto& erm = ks.get_vnode_effective_replication_map();
+        co_return compaction::make_owned_ranges_ptr(co_await _db.get_keyspace_local_ranges(erm));
+    };
+    auto owned_ranges_ptr = co_await get_owned_ranges(_status.keyspace);
     tasks::task_info info{_status.id, _status.shard};
     co_await run_on_table("upgrade_sstables", _db, _status.keyspace, _ti, [&] (replica::table& t) -> future<> {
         return t.parallel_foreach_table_state([&] (compaction::table_state& ts) -> future<> {
             return t.get_compaction_manager().perform_sstable_upgrade(owned_ranges_ptr, ts, _exclude_current_version, info);
         });
     });
+}
+
+tasks::is_user_task scrub_sstables_compaction_task_impl::is_user_task() const noexcept {
+    return tasks::is_user_task::yes;
 }
 
 future<> scrub_sstables_compaction_task_impl::run() {
@@ -595,28 +647,35 @@ future<> table_reshaping_compaction_task_impl::run() {
 
 future<> shard_reshaping_compaction_task_impl::run() {
     auto& table = _db.local().find_column_family(_status.keyspace, _status.table);
+    auto holder = table.async_gate().hold();
     tasks::task_info info{_status.id, _status.shard};
 
-    std::unordered_map<size_t, std::unordered_set<sstables::shared_sstable>> sstables_grouped_by_compaction_group;
+    std::unordered_map<compaction::table_state*, std::unordered_set<sstables::shared_sstable>> sstables_grouped_by_compaction_group;
     for (auto& sstable : _dir.get_unshared_local_sstables()) {
-        auto compaction_group_id = table.get_compaction_group_id_for_sstable(sstable);
-        sstables_grouped_by_compaction_group[compaction_group_id].insert(sstable);
+        auto& t = table.table_state_for_sstable(sstable);
+        sstables_grouped_by_compaction_group[&t].insert(sstable);
     }
 
     // reshape sstables individually within the compaction groups
-    for (auto& sstables_in_cg : sstables_grouped_by_compaction_group | boost::adaptors::map_values) {
-        co_await reshape_compaction_group(sstables_in_cg, table, info);
+    for (auto& sstables_in_cg : sstables_grouped_by_compaction_group) {
+        co_await reshape_compaction_group(*sstables_in_cg.first, sstables_in_cg.second, table, info);
     }
 }
 
-future<> shard_reshaping_compaction_task_impl::reshape_compaction_group(std::unordered_set<sstables::shared_sstable>& sstables_in_cg, replica::column_family& table, const tasks::task_info& info) {
+future<> shard_reshaping_compaction_task_impl::reshape_compaction_group(compaction::table_state& t, std::unordered_set<sstables::shared_sstable>& sstables_in_cg, replica::column_family& table, const tasks::task_info& info) {
 
     while (true) {
-        auto reshape_candidates = boost::copy_range<std::vector<sstables::shared_sstable>>(sstables_in_cg
-                | boost::adaptors::filtered([&filter = _filter] (const auto& sst) {
+        auto reshape_candidates = sstables_in_cg
+                | std::views::filter([&filter = _filter] (const auto& sst) {
             return filter(sst);
-        }));
-        auto desc = table.get_compaction_strategy().get_reshaping_job(std::move(reshape_candidates), table.schema(), _mode);
+        }) | std::ranges::to<std::vector>();
+        if (reshape_candidates.empty()) {
+            break;
+        }
+        // all sstables were found in the same sstable_directory instance, so they share the same underlying storage.
+        auto& storage = reshape_candidates.front()->get_storage();
+        auto cfg = co_await sstables::make_reshape_config(storage, _mode);
+        auto desc = table.get_compaction_strategy().get_reshaping_job(std::move(reshape_candidates), table.schema(), cfg);
         if (desc.sstables.empty()) {
             break;
         }
@@ -635,8 +694,8 @@ future<> shard_reshaping_compaction_task_impl::reshape_compaction_group(std::uno
         desc.creator = _creator;
 
         try {
-            co_await table.get_compaction_manager().run_custom_job(table.as_table_state(), sstables::compaction_type::Reshape, "Reshape compaction", [&dir = _dir, &table, sstlist = std::move(sstlist), desc = std::move(desc), &sstables_in_cg] (sstables::compaction_data& info, sstables::compaction_progress_monitor& progress_monitor) mutable -> future<> {
-                sstables::compaction_result result = co_await sstables::compact_sstables(std::move(desc), info, table.as_table_state(), progress_monitor);
+            co_await table.get_compaction_manager().run_custom_job(t, sstables::compaction_type::Reshape, "Reshape compaction", [&dir = _dir, sstlist = std::move(sstlist), desc = std::move(desc), &sstables_in_cg, &t] (sstables::compaction_data& info, sstables::compaction_progress_monitor& progress_monitor) mutable -> future<> {
+                sstables::compaction_result result = co_await sstables::compact_sstables(std::move(desc), info, t, progress_monitor);
                 // update the sstables_in_cg set with new sstables and remove the reshaped ones
                 for (auto& sst : sstlist) {
                     sstables_in_cg.erase(sst);
@@ -665,7 +724,7 @@ future<> table_resharding_compaction_task_impl::run() {
     auto all_jobs = co_await collect_all_shared_sstables(_dir, _db, _status.keyspace, _status.table, _owned_ranges_ptr);
     auto destinations = co_await distribute_reshard_jobs(std::move(all_jobs));
 
-    uint64_t total_size = boost::accumulate(destinations | boost::adaptors::transformed(std::mem_fn(&replica::reshard_shard_descriptor::size)), uint64_t(0));
+    uint64_t total_size = std::ranges::fold_left(destinations | std::views::transform(std::mem_fn(&replica::reshard_shard_descriptor::size)), uint64_t(0), std::plus{});
     if (total_size == 0) {
         co_return;
     }

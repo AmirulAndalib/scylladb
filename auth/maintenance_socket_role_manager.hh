@@ -3,14 +3,14 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
 #include "auth/resource.hh"
 #include "auth/role_manager.hh"
-#include "seastar/core/future.hh"
+#include <seastar/core/future.hh>
 
 namespace cql3 {
 class query_processor;
@@ -39,17 +39,21 @@ public:
 
     virtual future<> stop() override;
 
-    virtual future<> create(std::string_view role_name, const role_config&) override;
+    virtual future<> ensure_superuser_is_created() override;
 
-    virtual future<> drop(std::string_view role_name) override;
+    virtual future<> create(std::string_view role_name, const role_config&, ::service::group0_batch&) override;
 
-    virtual future<> alter(std::string_view role_name, const role_config_update&) override;
+    virtual future<> drop(std::string_view role_name, ::service::group0_batch& mc) override;
 
-    virtual future<> grant(std::string_view grantee_name, std::string_view role_name) override;
+    virtual future<> alter(std::string_view role_name, const role_config_update&, ::service::group0_batch&) override;
 
-    virtual future<> revoke(std::string_view revokee_name, std::string_view role_name) override;
+    virtual future<> grant(std::string_view grantee_name, std::string_view role_name, ::service::group0_batch& mc) override;
+
+    virtual future<> revoke(std::string_view revokee_name, std::string_view role_name, ::service::group0_batch& mc) override;
 
     virtual future<role_set> query_granted(std::string_view grantee_name, recursive_role_query) override;
+
+    virtual future<role_to_directly_granted_map> query_all_directly_granted() override;
 
     virtual future<role_set> query_all() override;
 
@@ -63,9 +67,11 @@ public:
 
     virtual future<role_manager::attribute_vals> query_attribute_for_all(std::string_view attribute_name) override;
 
-    virtual future<> set_attribute(std::string_view role_name, std::string_view attribute_name, std::string_view attribute_value) override;
+    virtual future<> set_attribute(std::string_view role_name, std::string_view attribute_name, std::string_view attribute_value, ::service::group0_batch& mc) override;
 
-    virtual future<> remove_attribute(std::string_view role_name, std::string_view attribute_name) override;
+    virtual future<> remove_attribute(std::string_view role_name, std::string_view attribute_name, ::service::group0_batch& mc) override;
+
+    virtual future<std::vector<cql3::description>> describe_role_grants() override;
 };
 
 }

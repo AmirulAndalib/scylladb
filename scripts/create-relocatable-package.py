@@ -5,7 +5,7 @@
 #
 
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
 import argparse
@@ -110,6 +110,8 @@ for exe in executables:
 
 # manually add libthread_db for debugging thread
 libs.update({'libthread_db.so.1': os.path.realpath('/lib64/libthread_db.so')})
+# manually add p11-kit-trust.so since it will dynamically load
+libs.update({'pkcs11/p11-kit-trust.so': '/lib64/pkcs11/p11-kit-trust.so'})
 
 ld_so = libs['ld.so']
 
@@ -130,6 +132,10 @@ with tempfile.NamedTemporaryFile('w+t') as version_file:
     version_file.write('3.0\n')
     version_file.flush()
     ar.add(version_file.name, arcname='.relocatable_package_version')
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    os.symlink('./pkcs11/p11-kit-trust.so', f'{tmpdir}/libnssckbi.so')
+    ar.reloc_add(f'{tmpdir}/libnssckbi.so', arcname='libreloc/libnssckbi.so')
 
 for exe in executables_scylla:
     basename = os.path.basename(exe)
@@ -171,6 +177,7 @@ ar.reloc_add('swagger-ui')
 ar.reloc_add('api')
 ar.reloc_add('tools/scyllatop')
 ar.reloc_add('scylla-gdb.py')
+ar.reloc_add('bin/nodetool')
 ar.reloc_add(args.debian_dir, arcname='debian')
 node_exporter_dir = args.node_exporter_dir
 if args.stripped:

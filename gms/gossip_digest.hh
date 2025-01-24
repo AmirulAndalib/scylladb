@@ -5,12 +5,11 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
 
-#include <seastar/core/sstring.hh>
 #include <fmt/core.h>
 #include "gms/inet_address.hh"
 #include "gms/generation-number.hh"
@@ -61,7 +60,7 @@ public:
 
 } // namespace gms
 
-template <> struct fmt::formatter<gms::gossip_digest> : fmt::formatter<std::string_view> {
+template <> struct fmt::formatter<gms::gossip_digest> : fmt::formatter<string_view> {
     auto format(const gms::gossip_digest& d, fmt::format_context& ctx) const {
         return fmt::format_to(ctx.out(), "{}:{}:{}", d._endpoint, d._generation, d._max_version);
     }

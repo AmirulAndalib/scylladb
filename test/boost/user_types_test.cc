@@ -3,20 +3,25 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-#include "test/lib/scylla_test_case.hh"
+#undef SEASTAR_TESTING_MAIN
+#include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/cql_assertions.hh"
 
+#include "types/map.hh"
+#include "types/set.hh"
 #include "types/user.hh"
 #include "types/list.hh"
 #include "test/lib/exception_utils.hh"
 #include "db/config.hh"
 
-#include <boost/algorithm/string/join.hpp>
+#include <fmt/ranges.h>
+
+BOOST_AUTO_TEST_SUITE(user_types_test)
 
 // Specifies that the given 'cql' query fails with the 'msg' message.
 // Requires a cql_test_env. The caller must be inside thread.
@@ -101,7 +106,15 @@ SEASTAR_TEST_CASE(test_user_type) {
 }
 
 SEASTAR_TEST_CASE(test_invalid_user_type_statements) {
-    return do_with_cql_env_thread([] (cql_test_env& e) {
+    // The test creates ut4 with a lot of fields,
+    // this may take a while in debug builds,
+    // to avoid raft operation timeout set the threshold
+    // to some big value.
+    co_await utils::get_local_injector().enable_on_all("group0-raft-op-timeout-in-ms", false, {
+        {"value", "600000" } // ten minutes
+    });
+
+    co_await do_with_cql_env_thread([] (cql_test_env& e) {
         e.execute_cql("create type ut1 (a int)").discard_result().get();
 
         // non-frozen UDTs can't be part of primary key
@@ -177,12 +190,12 @@ SEASTAR_TEST_CASE(test_invalid_user_type_statements) {
                 "Non-frozen UDTs with nested non-frozen collections are not supported");
 
         // cannot have too many fields inside UDTs
-        REQUIRE_INVALID(e, format("create type ut4 ({})", boost::algorithm::join(
-                boost::irange(0, 1 << 15) | boost::adaptors::transformed([] (int i) { return format("a{} int", i); }), ", ")),
+        REQUIRE_INVALID(e, seastar::format("create type ut4 ({})", fmt::join(
+                std::views::iota(0, 1 << 15) | std::views::transform([] (int i) { return format("a{} int", i); }), ", ")),
                 format("A user type cannot have more than {} fields", (1 << 15) - 1));
 
-        e.execute_cql(format("create type ut4 ({})", boost::algorithm::join(
-                boost::irange(1, 1 << 15) | boost::adaptors::transformed([] (int i) { return format("a{} int", i); }), ", "))).discard_result().get();
+        e.execute_cql(seastar::format("create type ut4 ({})", fmt::join(
+                std::views::iota(1, 1 << 15) | std::views::transform([] (int i) { return format("a{} int", i); }), ", "))).discard_result().get();
         REQUIRE_INVALID(e, "alter type ut4 add b int",
                 "Cannot add new field to type ks.ut4: maximum number of fields reached");
 
@@ -631,3 +644,34 @@ SEASTAR_TEST_CASE(test_user_type_quoted) {
         // Pass if the above CREATE TABLE completes without an exception.
     });
 }
+
+SEASTAR_TEST_CASE(test_cql3_name_without_frozen) {
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        const sstring type_name = "ut1";
+        const sstring frozen_type_name = seastar::format("frozen<{}>", type_name);
+
+        const auto type_ptr = user_type_impl::get_instance("ks", to_bytes(type_name),
+                {to_bytes("my_int")}, {int32_type}, false);
+        BOOST_REQUIRE(type_ptr->cql3_type_name_without_frozen() == type_name);
+
+        const auto wrapped_type_ptr = user_type_impl::get_instance("ks", to_bytes("wrapped_type"),
+                {to_bytes("field_name")}, {type_ptr->freeze()}, false);
+        const auto& field_type = wrapped_type_ptr->field_types()[0];
+        BOOST_REQUIRE(field_type->cql3_type_name() == frozen_type_name);
+        BOOST_REQUIRE(field_type->cql3_type_name_without_frozen() == type_name);
+
+        const sstring set_type_name = seastar::format("set<{}>", frozen_type_name);
+        const auto set_type_ptr = set_type_impl::get_instance(type_ptr->freeze(), false);
+        BOOST_REQUIRE(set_type_ptr->cql3_type_name_without_frozen() == set_type_name);
+
+        const sstring map_type_name = seastar::format("map<int, {}>", frozen_type_name);
+        const auto map_type_ptr = map_type_impl::get_instance(int32_type, type_ptr->freeze(), false);
+        BOOST_REQUIRE(map_type_ptr->cql3_type_name_without_frozen() == map_type_name);
+
+        const sstring list_type_name = seastar::format("list<{}>", frozen_type_name);
+        const auto list_type_ptr = list_type_impl::get_instance(type_ptr->freeze(), false);
+        BOOST_REQUIRE(list_type_ptr->cql3_type_name_without_frozen() == list_type_name);
+    });
+}
+
+BOOST_AUTO_TEST_SUITE_END()

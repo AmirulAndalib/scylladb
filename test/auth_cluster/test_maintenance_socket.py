@@ -1,7 +1,7 @@
 #
 # Copyright (C) 2023-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
 from cassandra.auth import PlainTextAuthProvider
@@ -24,12 +24,11 @@ async def test_maintenance_socket(manager: ManagerClient):
     }
 
     server = await manager.server_add(config=config)
-    workdir = await manager.server_get_workdir(server.server_id)
-    socket = workdir + "/cql.m"
+    socket = await manager.server_get_maintenance_socket_path(server.server_id)
 
     try:
         cluster = Cluster([server.ip_addr])
-        session = cluster.connect()
+        cluster.connect()
     except NoHostAvailable:
         pass
     else:

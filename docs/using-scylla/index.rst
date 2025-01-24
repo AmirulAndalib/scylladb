@@ -9,7 +9,6 @@ ScyllaDB for Developers
    Tutorials and Example Projects <https://docs.scylladb.com/stable/get-started/develop-with-scylladb/tutorials-example-projects.html>
    Learn to Use ScyllaDB <https://docs.scylladb.com/stable/get-started/learn-resources/index.html>
    ScyllaDB Alternator <alternator/index>
-   ScyllaDB Features <features>
    ScyllaDB Drivers <drivers/index>
 
 
@@ -37,7 +36,7 @@ ScyllaDB for Developers
   :id: "getting-started"
   :class: my-panel
  
-  * :doc:`ScyllaDB Tools </operating-scylla/admin-tools/index>` - Tools for testing and integrating with Scylla
+  * :doc:`ScyllaDB Tools </operating-scylla/admin-tools/index>` - Tools for testing and integrating with ScyllaDB
   * :doc:`cqlsh </cql/cqlsh>` - A command line shell for interacting with ScyllaDB through CQL
  
 

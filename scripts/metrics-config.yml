@@ -20,10 +20,13 @@
   params:
     stat_name: ["exclusive_row", "shared_row", "exclusive_partition", "shared_partition"]
 "replica/database.cc":
+  allowmismatch: true
   params:
     "_dirty_memory_manager.throttle_threshold()": "throttle threshold"
 "seastar/apps/metrics_tester/metrics_tester.cc": skip
 "seastar/tests/unit/metrics_test.cc": skip
+"seastar/tests/unit/metrics_tester.cc": skip
+"seastar/tests/unit/prometheus_http_test.cc": skip
 "service/storage_proxy.cc":
   params:
     COORDINATOR_STATS_CATEGORY: "storage_proxy_coordinator"
@@ -51,7 +54,7 @@
         "100": execution_stages
 "seastar/src/core/fair_queue.cc":
     groups:
-        "400": io_queue
+        "300": io_queue
 "seastar/src/net/net.cc":
     params:
         _stats_plugin_name: ["stats_plugin_name"]

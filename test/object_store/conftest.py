@@ -1,13 +1,8 @@
 #!/usr/bin/python3
-
 import os
-import sys
-import logging
-import pytest
-import pathlib
+import boto3
 
 # use minio_server
-sys.path.insert(1, sys.path[0] + '/../..')
 from test.pylib.minio_server import MinioServer
 from test.pylib.cql_repl import conftest
 from test.topology.conftest import *
@@ -28,12 +23,22 @@ def pytest_addoption(parser):
 
     parser.addoption('--manager-api', action='store', required=True,
                      help='Manager unix socket path')
-    parser.addoption('--mode', action='store', required=True,
-                     help='Scylla build mode. Tests can use it to adjust their behavior.')
+    parser.addoption("--artifacts_dir_url", action='store', type=str, default=None, dest="artifacts_dir_url",
+                     help="Provide the URL to artifacts directory to generate the link to failed tests directory "
+                          "with logs")
     parser.addoption('--auth_username', action='store', default=None,
                         help='username for authentication')
     parser.addoption('--auth_password', action='store', default=None,
                         help='password for authentication')
+
+
+def format_tuples(tuples=None, **kwargs):
+    '''format a dict to structured values (tuples) in CQL'''
+    if tuples is None:
+        tuples = {}
+    tuples.update(kwargs)
+    body = ', '.join(f"'{key}': '{value}'" for key, value in tuples.items())
+    return f'{{ {body} }}'
 
 
 class S3_Server:
@@ -66,17 +71,6 @@ class S3_Server:
 
     async def stop(self):
         pass
-
-
-@pytest.fixture(scope="function")
-def test_tempdir(tmpdir, request):
-    tempdir = tmpdir.strpath
-    try:
-        yield tempdir
-    finally:
-        if request.config.getoption('--keep-tmp'):
-            return
-        _remove_all_but(tempdir, 'log')
 
 
 @pytest.fixture(scope="function")
@@ -122,3 +116,15 @@ async def s3_server(pytestconfig, tmpdir):
         yield server
     finally:
         await server.stop()
+
+
+def get_s3_resource(s3_server):
+    """Creates boto3.resource object that can be used to communicate to the given server"""
+    return boto3.resource('s3',
+        endpoint_url=f'http://{s3_server.address}:{s3_server.port}',
+        aws_access_key_id=s3_server.acc_key,
+        aws_secret_access_key=s3_server.secret_key,
+        aws_session_token=None,
+        config=boto3.session.Config(signature_version='s3v4'),
+        verify=False
+    )

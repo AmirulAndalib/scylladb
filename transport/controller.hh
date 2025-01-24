@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -34,6 +34,7 @@ struct client_data;
 namespace cql_transport {
 
 class cql_server;
+struct connection_service_level_params;
 class controller : public protocol_server {
     std::vector<socket_address> _listen_addresses;
     std::unique_ptr<sharded<cql_server>> _server;
@@ -68,7 +69,8 @@ public:
     controller(sharded<auth::service>&, sharded<service::migration_notifier>&, sharded<gms::gossiper>&,
             sharded<cql3::query_processor>&, sharded<service::memory_limiter>&,
             sharded<qos::service_level_controller>&, sharded<service::endpoint_lifecycle_notifier>&,
-            const db::config& cfg, scheduling_group_key cql_opcode_stats_key, maintenance_socket_enabled used_by_maintenance_socket);
+            const db::config& cfg, scheduling_group_key cql_opcode_stats_key, maintenance_socket_enabled used_by_maintenance_socket,
+            seastar::scheduling_group sg);
     virtual sstring name() const override;
     virtual sstring protocol() const override;
     virtual sstring protocol_version() const override;
@@ -77,6 +79,9 @@ public:
     virtual future<> stop_server() override;
     virtual future<> request_stop_server() override;
     virtual future<utils::chunked_vector<client_data>> get_client_data() override;
+    future<> update_connections_scheduling_group();
+
+    future<std::vector<connection_service_level_params>> get_connections_service_level_params();
 };
 
 } // namespace cql_transport

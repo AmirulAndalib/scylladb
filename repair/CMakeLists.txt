@@ -10,6 +10,7 @@ target_include_directories(repair
 target_link_libraries(repair
   PUBLIC
     idl
+    absl::headers
     Seastar::seastar
     xxHash::xxhash)
 

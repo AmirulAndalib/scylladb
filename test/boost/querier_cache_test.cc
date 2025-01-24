@@ -3,8 +3,10 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
+
+#include <algorithm>
 
 #include "querier.hh"
 #include "mutation_query.hh"
@@ -15,14 +17,18 @@
 #include "test/lib/exception_utils.hh"
 #include "db/config.hh"
 
+#include <fmt/ranges.h>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/thread.hh>
-#include "test/lib/scylla_test_case.hh"
+#undef SEASTAR_TESTING_MAIN
+#include <seastar/testing/test_case.hh>
+#include <seastar/testing/thread_test_case.hh>
 #include <seastar/util/closeable.hh>
 
-#include <boost/range/algorithm/sort.hpp>
 #include "readers/from_mutations_v2.hh"
 #include "readers/empty_v2.hh"
+
+BOOST_AUTO_TEST_SUITE(querier_cache_test)
 
 using namespace std::chrono_literals;
 
@@ -96,7 +102,7 @@ private:
             mutations.emplace_back(std::move(mut));
         }
 
-        boost::sort(mutations, [] (const mutation& a, const mutation& b) {
+        std::ranges::sort(mutations, [] (const mutation& a, const mutation& b) {
             return a.decorated_key().tri_compare(*a.schema(), b.decorated_key()) < 0;
         });
 
@@ -158,7 +164,7 @@ public:
         , _cache(is_user_semaphore ? std::move(is_user_semaphore) : [] (const reader_concurrency_semaphore&) { return true; }, entry_ttl)
         , _mutations(make_mutations(_s, external_make_value))
         , _mutation_source([this] (schema_ptr schema, reader_permit permit, const dht::partition_range& range) {
-            auto rd = make_flat_mutation_reader_from_mutations_v2(schema, std::move(permit), _mutations, range);
+            auto rd = make_mutation_reader_from_mutations_v2(schema, std::move(permit), _mutations, range);
             rd.set_max_buffer_size(max_reader_buffer_size);
             return rd;
         }) {
@@ -833,3 +839,5 @@ SEASTAR_THREAD_TEST_CASE(test_semaphore_mismatch) {
             .no_evictions();
     }
 }
+
+BOOST_AUTO_TEST_SUITE_END()

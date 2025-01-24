@@ -1,18 +1,95 @@
 #
 # Copyright (C) 2024-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 from cassandra.query import SimpleStatement, ConsistencyLevel
 from test.pylib.manager_client import ManagerClient
-from test.pylib.rest_client import HTTPError
+from test.pylib.rest_client import HTTPError, read_barrier
 from test.pylib.tablets import get_all_tablet_replicas
 from test.topology.conftest import skip_mode
+from test.topology.util import wait_for_cql_and_get_hosts
+import time
 import pytest
 import logging
 import asyncio
 
 logger = logging.getLogger(__name__)
+
+
+@pytest.mark.parametrize("action", ['move', 'add_replica', 'del_replica'])
+@pytest.mark.asyncio
+async def test_tablet_transition_sanity(manager: ManagerClient, action):
+    logger.info("Bootstrapping cluster")
+    cfg = {'enable_user_defined_functions': False, 'enable_tablets': True}
+    host_ids = []
+    servers = []
+
+    async def make_server():
+        s = await manager.server_add(config=cfg)
+        servers.append(s)
+        host_ids.append(await manager.get_host_id(s.server_id))
+        await manager.api.disable_tablet_balancing(s.ip_addr)
+
+    await make_server()
+    await make_server()
+    await make_server()
+
+    cql = manager.get_cql()
+
+    await cql.run_async("CREATE KEYSPACE test WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 2} AND tablets = {'initial': 1}")
+    await cql.run_async("CREATE TABLE test.test (pk int PRIMARY KEY, c int);")
+    keys = range(256)
+    await asyncio.gather(*[cql.run_async(f"INSERT INTO test.test (pk, c) VALUES ({k}, {k});") for k in keys])
+
+    replicas = await get_all_tablet_replicas(manager, servers[0], 'test', 'test')
+    logger.info(f"Tablet is on [{replicas}]")
+    assert len(replicas) == 1 and len(replicas[0].replicas) == 2
+    old_replica = replicas[0].replicas[0]
+    replicas = [ r[0] for r in replicas[0].replicas ]
+    for h in host_ids:
+        if h not in replicas:
+            new_replica = (h, 0)
+            break
+    else:
+        assert False, "Cannot find node without replica"
+
+    if action == 'move':
+        logger.info(f"Move tablet {old_replica[0]} -> {new_replica[0]}")
+        await manager.api.move_tablet(servers[0].ip_addr, "test", "test", old_replica[0], old_replica[1], new_replica[0], new_replica[1], 0)
+    if action == 'add_replica':
+        logger.info(f"Adding replica to tablet, host {new_replica[0]}")
+        await manager.api.add_tablet_replica(servers[0].ip_addr, "test", "test", new_replica[0], new_replica[1], 0)
+    if action == 'del_replica':
+        logger.info(f"Deleting replica from tablet, host {old_replica[0]}")
+        await manager.api.del_tablet_replica(servers[0].ip_addr, "test", "test", old_replica[0], old_replica[1], 0)
+
+    replicas = await get_all_tablet_replicas(manager, servers[0], 'test', 'test')
+    logger.info(f"Tablet is now on [{replicas}]")
+    assert len(replicas) == 1
+    replicas = [ r[0] for r in replicas[0].replicas ]
+    if action == 'move':
+        assert len(replicas) == 2
+        assert new_replica[0] in replicas
+        assert old_replica[0] not in replicas
+    if action == 'add_replica':
+        assert len(replicas) == 3
+        assert old_replica[0] in replicas
+        assert new_replica[0] in replicas
+    if action == 'del_replica':
+        assert len(replicas) == 1
+        assert old_replica[0] not in replicas
+
+    for h, s in zip(host_ids, servers):
+        host = await wait_for_cql_and_get_hosts(cql, [s], time.time() + 30)
+        if h != host_ids[0]:
+            await read_barrier(manager.api, host[0].address)  # host-0 did the barrier in get_all_tablet_replicas above
+        res = await cql.run_async("SELECT COUNT(*) FROM MUTATION_FRAGMENTS(test.test)", host=host[0])
+        logger.info(f"Host {h} reports {res} as mutation fragments count")
+        if h in replicas:
+            assert res[0].count != 0
+        else:
+            assert res[0].count == 0
 
 
 @pytest.mark.parametrize("fail_replica", ["source", "destination"])
@@ -26,7 +103,7 @@ async def test_node_failure_during_tablet_migration(manager: ManagerClient, fail
         pytest.skip('Failing source during target cleanup is pointless')
 
     logger.info("Bootstrapping cluster")
-    cfg = {'enable_user_defined_functions': False, 'experimental_features': ['tablets', 'consistent-topology-changes']}
+    cfg = {'enable_user_defined_functions': False, 'enable_tablets': True, 'failure_detector_timeout_in_ms': 2000}
     host_ids = []
     servers = []
 
@@ -134,7 +211,7 @@ async def test_node_failure_during_tablet_migration(manager: ManagerClient, fail
 
         async def stop(self, via=0):
             if self.stage == "cleanup_target":
-                await self.cleanup_fail.stop(via=3) # removenode of source is happending via node0 already
+                await self.cleanup_fail.stop(via=3) # removenode of source is happening via node0 already
                 await self.stream_stop_task
                 return
             if self.stage == "revert_migration":
@@ -164,3 +241,51 @@ async def test_node_failure_during_tablet_migration(manager: ManagerClient, fail
     assert len(replicas) == 1
     for r in replicas[0].replicas:
         assert r[0] != host_ids[failer.fail_idx]
+
+@pytest.mark.asyncio
+async def test_tablet_back_and_forth_migration(manager: ManagerClient):
+    logger.info("Bootstrapping cluster")
+    cfg = {'enable_user_defined_functions': False, 'enable_tablets': True}
+    host_ids = []
+    servers = []
+
+    async def make_server():
+        s = await manager.server_add(config=cfg)
+        servers.append(s)
+        host_ids.append(await manager.get_host_id(s.server_id))
+        await manager.api.disable_tablet_balancing(s.ip_addr)
+
+    async def assert_rows(num):
+        res = await cql.run_async(f"SELECT * FROM test.test")
+        assert len(res) == num
+
+    await make_server()
+    cql = manager.get_cql()
+    await cql.run_async("CREATE KEYSPACE test WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'initial': 1}")
+    await cql.run_async("CREATE TABLE test.test (pk int PRIMARY KEY, c int);")
+    await make_server()
+
+    await cql.run_async(f"INSERT INTO test.test (pk, c) VALUES ({1}, {1});")
+    await assert_rows(1)
+
+    replicas = await get_all_tablet_replicas(manager, servers[0], 'test', 'test')
+    logger.info(f"Tablet is on [{replicas}]")
+    assert len(replicas) == 1 and len(replicas[0].replicas) == 1
+
+    old_replica = replicas[0].replicas[0]
+    assert old_replica[0] != host_ids[1]
+    new_replica = (host_ids[1], 0)
+
+    logger.info(f"Moving tablet {old_replica} -> {new_replica}")
+    manager.api.move_tablet(servers[0].ip_addr, "test", "test", old_replica[0], old_replica[1], new_replica[0], new_replica[1], 0)
+
+    await assert_rows(1)
+    await cql.run_async(f"INSERT INTO test.test (pk, c) VALUES ({2}, {2});")
+    await assert_rows(2)
+
+    logger.info(f"Moving tablet {new_replica} -> {old_replica}")
+    manager.api.move_tablet(servers[0].ip_addr, "test", "test", new_replica[0], new_replica[1], old_replica[0], old_replica[1], 0)
+
+    await assert_rows(2)
+    await cql.run_async(f"INSERT INTO test.test (pk, c) VALUES ({3}, {3});")
+    await assert_rows(3)

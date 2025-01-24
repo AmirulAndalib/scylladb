@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -12,7 +12,9 @@
 #include <seastar/core/future.hh>
 #include <seastar/core/loop.hh>
 #include <seastar/core/coroutine.hh>
+#include <seastar/core/shared_future.hh>
 #include <seastar/coroutine/maybe_yield.hh>
+#include "utils/assert.hh"
 #include "utils/bptree.hh"
 #include "utils/lru.hh"
 #include "utils/lsa/weak_ptr.hh"
@@ -57,7 +59,7 @@ private:
                 // Live entry_ptr should keep the entry alive, except when the entry failed on loading.
                 // In that case, entry_ptr holders are not supposed to use the pointer, so it's safe
                 // to nullify those entry_ptrs.
-                assert(!ready());
+                SCYLLA_ASSERT(!ready());
             }
         }
 
@@ -206,7 +208,7 @@ public:
             return with_allocator(_region.allocator(), [&] {
                 auto it_and_flag = _cache.emplace(key, this, key);
                 entry &cp = *it_and_flag.first;
-                assert(it_and_flag.second);
+                SCYLLA_ASSERT(it_and_flag.second);
                 try {
                     return share(cp);
                 } catch (...) {
@@ -253,36 +255,36 @@ public:
             });
         });
         while (partial_page || i != _cache.end()) {
-          if (partial_page) {
-            auto preempted = with_allocator(_region.allocator(), [&] {
-                while (!partial_page->empty()) {
-                    partial_page->clear_one_entry();
-                    if (need_preempt()) {
-                        return true;
+            if (partial_page) {
+                auto preempted = with_allocator(_region.allocator(), [&] {
+                    while (!partial_page->empty()) {
+                        partial_page->clear_one_entry();
+                        if (need_preempt()) {
+                            return true;
+                        }
                     }
+                    partial_page.reset();
+                    return false;
+                });
+                if (preempted) {
+                    auto key = (i != _cache.end()) ? std::optional(i->key()) : std::nullopt;
+                    co_await coroutine::maybe_yield();
+                    i = key ? _cache.lower_bound(*key) : _cache.end();
                 }
-                partial_page.reset();
-                return false;
-            });
-            if (preempted) {
-                auto key = (i != _cache.end()) ? std::optional(i->key()) : std::nullopt;
-                co_await coroutine::maybe_yield();
-                i = key ? _cache.lower_bound(*key) : _cache.end();
+            } else {
+                with_allocator(_region.allocator(), [&] {
+                    if (i->is_referenced()) {
+                        ++i;
+                    } else {
+                        _lru.remove(*i);
+                        on_evicted(*i);
+                        if (i->ready()) {
+                            partial_page = std::move(i->page());
+                        }
+                        i = i.erase(key_less_comparator());
+                    }
+                });
             }
-          } else {
-            with_allocator(_region.allocator(), [&] {
-                if (i->is_referenced()) {
-                    ++i;
-                } else {
-                    _lru.remove(*i);
-                    on_evicted(*i);
-                    if (i->ready()) {
-                        partial_page = std::move(i->page());
-                    }
-                    i = i.erase(key_less_comparator());
-                }
-            });
-          }
         }
     }
 };

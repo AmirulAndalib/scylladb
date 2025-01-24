@@ -3,10 +3,11 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <boost/test/unit_test.hpp>
+#include <fmt/ranges.h>
 
 #include "replica/database.hh"
 #include "db/view/view_builder.hh"
@@ -16,45 +17,39 @@
 #include "db/config.hh"
 #include "cql3/query_options.hh"
 
-#include "test/lib/scylla_test_case.hh"
+#undef SEASTAR_TESTING_MAIN
+#include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
 #include <seastar/util/closeable.hh>
 
+#include "schema/schema_builder.hh"
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/cql_assertions.hh"
+#include "test/lib/eventually.hh"
 #include "test/lib/sstable_utils.hh"
-#include "schema/schema_builder.hh"
 #include "test/lib/data_model.hh"
 #include "test/lib/log.hh"
 #include "test/lib/random_utils.hh"
 #include "test/lib/key_utils.hh"
 #include "test/lib/mutation_source_test.hh"
 #include "test/lib/mutation_assertions.hh"
-#include "utils/ranges.hh"
+#include "test/lib/simple_schema.hh"
+#include "test/lib/test_utils.hh"
 
 #include "readers/from_mutations_v2.hh"
 #include "readers/evictable.hh"
+
+BOOST_AUTO_TEST_SUITE(view_build_test)
 
 using namespace std::literals::chrono_literals;
 
 schema_ptr test_table_schema() {
     static thread_local auto s = [] {
-        schema_builder builder(make_shared_schema(
-                generate_legacy_id("try1", "data"), "try1", "data",
-        // partition key
-        {{"p", utf8_type}},
-        // clustering key
-        {{"c", utf8_type}},
-        // regular columns
-        {{"v", utf8_type}},
-        // static columns
-        {},
-        // regular column name type
-        utf8_type,
-        // comment
-        ""
-       ));
-       return builder.build(schema_builder::compact_storage::no);
+        schema_builder builder("try1", "data", generate_legacy_id("try1", "data"));
+        builder.with_column("p", utf8_type, column_kind::partition_key);
+        builder.with_column("c", utf8_type, column_kind::clustering_key);
+        builder.with_column("v", utf8_type);
+        return builder.build(schema_builder::compact_storage::no);
     }();
     return s;
 }
@@ -227,7 +222,7 @@ SEASTAR_TEST_CASE(test_builder_across_tokens_with_large_partitions) {
         auto s = e.local_db().find_schema("ks", "cf");
 
         auto make_key = [&] (auto) { return to_hex(random_bytes(128, gen));  };
-        for (auto&& k : boost::irange(0, 4) | boost::adaptors::transformed(make_key)) {
+        for (auto&& k : std::views::iota(0, 4) | std::views::transform(make_key)) {
             for (auto i = 0; i < 1000; ++i) {
                 e.execute_cql(format("insert into cf (p, c, v) values (0x{}, {:d}, 0)", k, i)).get();
             }
@@ -269,7 +264,7 @@ SEASTAR_TEST_CASE(test_builder_across_tokens_with_small_partitions) {
         auto s = e.local_db().find_schema("ks", "cf");
 
         auto make_key = [&] (auto) { return to_hex(random_bytes(128, gen));  };
-        for (auto&& k : boost::irange(0, 1000) | boost::adaptors::transformed(make_key)) {
+        for (auto&& k : std::views::iota(0, 1000) | std::views::transform(make_key)) {
             for (auto i = 0; i < 4; ++i) {
                 e.execute_cql(format("insert into cf (p, c, v) values (0x{}, {:d}, 0)", k, i)).get();
             }
@@ -379,7 +374,7 @@ SEASTAR_TEST_CASE(test_builder_with_concurrent_drop) {
         e.execute_cql("create table cf (p blob, c int, v int, primary key (p, c))").get();
 
         auto make_key = [&] (auto) { return to_hex(random_bytes(128, gen));  };
-        for (auto&& k : boost::irange(0, 1000) | boost::adaptors::transformed(make_key)) {
+        for (auto&& k : std::views::iota(0, 1000) | std::views::transform(make_key)) {
             for (auto i = 0; i < 5; ++i) {
                 e.execute_cql(format("insert into cf (p, c, v) values (0x{}, {:d}, 0)", k, i)).get();
             }
@@ -440,7 +435,7 @@ SEASTAR_TEST_CASE(test_view_update_generator) {
             auto sst = t->make_streaming_staging_sstable();
             sstables::sstable_writer_config sst_cfg = e.db().local().get_user_sstables_manager().configure_writer("test");
             auto permit = e.local_db().get_reader_concurrency_semaphore().make_tracking_only_permit(s, "test", db::no_timeout, {});
-            sst->write_components(make_flat_mutation_reader_from_mutations_v2(m.schema(), std::move(permit), m), 1ul, s, sst_cfg, {}).get();
+            sst->write_components(make_mutation_reader_from_mutations_v2(m.schema(), std::move(permit), m), 1ul, s, sst_cfg, {}).get();
             sst->open_data().get();
             t->add_sstable_and_update_cache(sst).get();
             return sst;
@@ -552,7 +547,7 @@ SEASTAR_THREAD_TEST_CASE(test_view_update_generator_deadlock) {
         auto sst = t->make_streaming_staging_sstable();
         sstables::sstable_writer_config sst_cfg = e.local_db().get_user_sstables_manager().configure_writer("test");
         auto permit = e.local_db().get_reader_concurrency_semaphore().make_tracking_only_permit(s, "test", db::no_timeout, {});
-        sst->write_components(make_flat_mutation_reader_from_mutations_v2(m.schema(), std::move(permit), m), 1ul, s, sst_cfg, {}).get();
+        sst->write_components(make_mutation_reader_from_mutations_v2(m.schema(), std::move(permit), m), 1ul, s, sst_cfg, {}).get();
         sst->open_data().get();
         t->add_sstable_and_update_cache(sst).get();
 
@@ -624,7 +619,7 @@ SEASTAR_THREAD_TEST_CASE(test_view_update_generator_register_semaphore_unit_leak
             auto sst = t->make_streaming_staging_sstable();
             sstables::sstable_writer_config sst_cfg = e.local_db().get_user_sstables_manager().configure_writer("test");
             auto permit = e.local_db().get_reader_concurrency_semaphore().make_tracking_only_permit(s, "test", db::no_timeout, {});
-            sst->write_components(make_flat_mutation_reader_from_mutations_v2(m.schema(), std::move(permit), m), 1ul, s, sst_cfg, {}).get();
+            sst->write_components(make_mutation_reader_from_mutations_v2(m.schema(), std::move(permit), m), 1ul, s, sst_cfg, {}).get();
             sst->open_data().get();
             t->add_sstable_and_update_cache(sst).get();
             return sst;
@@ -808,9 +803,9 @@ SEASTAR_THREAD_TEST_CASE(test_view_update_generator_buffering) {
 
     const auto partition_size_sets = std::vector<std::vector<int>>{{12}, {8, 4}, {8, 16}, {22}, {8, 8, 8, 8}, {8, 8, 8, 16, 8}, {8, 20, 16, 16}, {50}, {21}, {21, 2}};
     const auto max_partition_set_size = std::ranges::max_element(partition_size_sets, [] (const std::vector<int>& a, const std::vector<int>& b) { return a.size() < b.size(); })->size();
-    auto pkeys = ranges::to<std::vector<dht::decorated_key>>(boost::irange(size_t{0}, max_partition_set_size) | boost::adaptors::transformed([schema] (int i) {
+    auto pkeys = std::views::iota(size_t{0}, max_partition_set_size) | std::views::transform([schema] (int i) {
         return dht::decorate_key(*schema, partition_key::from_single_value(*schema, int32_type->decompose(data_value(i))));
-    }));
+    }) | std::ranges::to<std::vector>();
     std::ranges::sort(pkeys, dht::ring_position_less_comparator(*schema));
 
     for (auto partition_sizes_100kb : partition_size_sets) {
@@ -1015,3 +1010,5 @@ SEASTAR_THREAD_TEST_CASE(test_view_update_generator_buffering_with_empty_mutatio
 
     vuc.consume_end_of_stream();
 }
+
+BOOST_AUTO_TEST_SUITE_END()

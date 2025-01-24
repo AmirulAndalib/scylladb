@@ -1,10 +1,10 @@
 #
 # Copyright 2024-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
-from rest_api_mock import expected_request
+from test.nodetool.rest_api_mock import expected_request
 from typing import NamedTuple
 
 import pytest
@@ -55,7 +55,7 @@ def test_tablehistograms(nodetool, param):
 
     res = nodetool(*param.args, expected_requests=expected_requests)
 
-    assert res == f"""{param.keyspace_name}/{param.table_name} histograms
+    assert res.stdout == f"""{param.keyspace_name}/{param.table_name} histograms
 Percentile  SSTables     Write Latency      Read Latency    Partition Size        Cell Count
                               (micros)          (micros)           (bytes)                  
 50%             2.00              4.00             32.00                 3                 2
@@ -65,5 +65,46 @@ Percentile  SSTables     Write Latency      Read Latency    Partition Size      
 99%             7.00             11.00             76.74                 7                 4
 Min             0.00              3.00             10.00                 0                 0
 Max             7.00             17.00             95.00                 7                 4
+
+"""
+
+# The java implementation explodes with null pointer exception.
+# It is not worth trying to fix, so just disable this test for the java nodetool.
+def test_tablehistograms_empty_histogram(scylla_only, nodetool):
+    keyspace_name = "ks"
+    table_name = "tbl"
+    table_param = f"{keyspace_name}:{table_name}"
+
+    empty_estimated_histogram = {"buckets": [0]}
+    empty_histogram = {"meter": {"rates": [0,0,0], "mean_rate": 0, "count": 0}, "hist": {"count": 0, "sum": 0, "min": 0, "max": 0, "variance": 0, "mean": 0}}
+
+    expected_requests = [
+            expected_request("GET", "/column_family/",
+                             response=[{"ks": keyspace_name, "cf": table_name, "type": "ColumnFamilies"}],
+                             multiple=expected_request.ANY),
+            expected_request("GET", f"/column_family/metrics/estimated_row_size_histogram/{table_param}",
+                             response=empty_estimated_histogram),
+            expected_request("GET", f"/column_family/metrics/estimated_column_count_histogram/{table_param}",
+                             response=empty_estimated_histogram),
+            expected_request("GET", f"/column_family/metrics/read_latency/moving_average_histogram/{table_param}",
+                             response=empty_histogram),
+            expected_request("GET", f"/column_family/metrics/write_latency/moving_average_histogram/{table_param}",
+                             response=empty_histogram),
+            expected_request("GET", f"/column_family/metrics/sstables_per_read_histogram/{table_param}",
+                             response=empty_estimated_histogram),
+    ]
+
+    res = nodetool("tablehistograms", keyspace_name, table_name, expected_requests=expected_requests)
+
+    assert res.stdout == f"""{keyspace_name}/{table_name} histograms
+Percentile  SSTables     Write Latency      Read Latency    Partition Size        Cell Count
+                              (micros)          (micros)           (bytes)                  
+50%             0.00              0.00              0.00                 0                 0
+75%             0.00              0.00              0.00                 0                 0
+95%             0.00              0.00              0.00                 0                 0
+98%             0.00              0.00              0.00                 0                 0
+99%             0.00              0.00              0.00                 0                 0
+Min             0.00              0.00              0.00                 0                 0
+Max             0.00              0.00              0.00                 0                 0
 
 """

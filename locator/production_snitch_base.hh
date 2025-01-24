@@ -5,11 +5,12 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
 
+#include "utils/assert.hh"
 #include <unordered_map>
 #include <unordered_set>
 
@@ -45,7 +46,7 @@ public:
 private:
     virtual void set_my_dc_and_rack(const sstring& new_dc, const sstring& new_rack) override;
     virtual void set_prefer_local(bool prefer_local) override;
-    void parse_property_file();
+    void parse_property_file(std::string contents);
 
     virtual bool prefer_local() const noexcept override {
         return _prefer_local;
@@ -69,27 +70,25 @@ protected:
     void throw_incomplete_file() const;
 
 protected:
-    std::string _prop_file_contents;
     sstring _prop_file_name;
     std::unordered_map<sstring, sstring> _prop_values;
 
     sharded<snitch_ptr>& container() noexcept {
-        assert(_backreference != nullptr);
+        SCYLLA_ASSERT(_backreference != nullptr);
         return _backreference->container();
     }
 
     snitch_ptr& local() noexcept {
-        assert(_backreference != nullptr);
+        SCYLLA_ASSERT(_backreference != nullptr);
         return *_backreference;
     }
 
     const snitch_ptr& local() const noexcept {
-        assert(_backreference != nullptr);
+        SCYLLA_ASSERT(_backreference != nullptr);
         return *_backreference;
     }
 
 private:
-    size_t _prop_file_size;
     snitch_ptr* _backreference = nullptr;
 protected:
     /*

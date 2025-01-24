@@ -1,12 +1,12 @@
 #
 # Copyright 2024-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
 import pytest
 from subprocess import CalledProcessError
-from rest_api_mock import expected_request
+from test.nodetool.rest_api_mock import expected_request
 
 
 def get_keyspace_view_from_args(args):
@@ -30,13 +30,13 @@ def format_status(host, info):
 
 def format_output(keyspace, view, view_status):
     table = format_status("Host", "Info")
-    succceed = True
+    succeed = True
     for host, status in view_status.items():
         if status != 'SUCCESS':
-            succceed = False
+            succeed = False
         table += format_status(host, status)
     output = ''
-    if succceed:
+    if succeed:
         output += f"{keyspace}.{view} has finished building\n"
     else:
         output += f"{keyspace}.{view} has not finished building; node status is below.\n"
@@ -104,7 +104,8 @@ def test_viewbuildstatus(request, nodetool, args, statuses, returncode):
         if all(status == 'SUCCESS' for status in statuses):
             # invalid argument
             with pytest.raises(CalledProcessError) as exc_info:
-                actual_output = nodetool("viewbuildstatus", *args, expected_requests=expected_requests)
+                res = nodetool("viewbuildstatus", *args, expected_requests=expected_requests)
+                actual_output = res.stdout
             assert exc_info.type is CalledProcessError
             assert exc_info.value.returncode == 1
             expected_stdout, expected_stderr = format_invalid_argument_error(is_scylla)
@@ -112,10 +113,12 @@ def test_viewbuildstatus(request, nodetool, args, statuses, returncode):
             assert expected_stderr in exc_info.value.stderr
         else:
             with pytest.raises(CalledProcessError) as exc_info:
-                actual_output = nodetool("viewbuildstatus", *args, expected_requests=expected_requests)
+                res = nodetool("viewbuildstatus", *args, expected_requests=expected_requests)
+                actual_output = res.stdout
             assert exc_info.type is CalledProcessError
             assert exc_info.value.returncode == 1
             assert exc_info.value.output == expected_output
     else:
-        actual_output = nodetool("viewbuildstatus", *args, expected_requests=expected_requests)
+        res = nodetool("viewbuildstatus", *args, expected_requests=expected_requests)
+        actual_output = res.stdout
         assert actual_output == expected_output

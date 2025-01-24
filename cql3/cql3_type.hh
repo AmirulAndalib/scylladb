@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
@@ -64,7 +64,6 @@ public:
         static shared_ptr<raw> set(shared_ptr<raw> t);
         static shared_ptr<raw> tuple(std::vector<shared_ptr<raw>> ts);
         static shared_ptr<raw> frozen(shared_ptr<raw> t);
-        friend std::ostream& operator<<(std::ostream& os, const raw& r);
         friend sstring format_as(const raw& r) {
             return r.to_string();
         }
@@ -78,9 +77,6 @@ private:
     class raw_tuple;
     friend std::string_view format_as(const cql3_type& t) {
         return t.to_string();
-    }
-    friend std::ostream& operator<<(std::ostream& os, const cql3_type& t) {
-        return os << t.to_string();
     }
 
 public:
@@ -363,3 +359,10 @@ inline bool operator==(const cql3_type& a, const cql3_type& b) {
 #endif
 
 }
+
+template <>
+struct fmt::formatter<cql3::cql3_type>: fmt::formatter<string_view> {
+    auto format(const cql3::cql3_type& t, fmt::format_context& ctx) const {
+        return formatter<string_view>::format(format_as(t), ctx);
+    }
+};

@@ -1,31 +1,36 @@
 set(unstripped_dist_pkg
-  ${CMAKE_CURRENT_BINARY_DIR}/${Scylla_PRODUCT}-unstripped-${Scylla_VERSION}-${Scylla_RELEASE}.${CMAKE_SYSTEM_PROCESSOR}.tar.gz)
+  ${CMAKE_BINARY_DIR}/$<CONFIG>/dist/tar/${Scylla_PRODUCT}-unstripped-${Scylla_VERSION}-${Scylla_RELEASE}.${CMAKE_SYSTEM_PROCESSOR}.tar.gz)
 add_custom_command(
   OUTPUT ${unstripped_dist_pkg}
-  COMMAND scripts/create-relocatable-package.py
-    --build-dir ${CMAKE_BINARY_DIR}/$<CONFIG>
-    --node-exporter-dir ${CMAKE_BINARY_DIR}/node_exporter
-    --debian-dir ${CMAKE_BINARY_DIR}/debian
-    ${unstripped_dist_pkg}
+  COMMAND
+    scripts/create-relocatable-package.py
+      --build-dir ${CMAKE_BINARY_DIR}/$<CONFIG>
+      --node-exporter-dir ${CMAKE_BINARY_DIR}/node_exporter
+      --debian-dir ${CMAKE_BINARY_DIR}/debian
+      ${unstripped_dist_pkg}
   DEPENDS
-    scylla
+    ${CMAKE_BINARY_DIR}/$<CONFIG>/scylla
     ${CMAKE_BINARY_DIR}/$<CONFIG>/iotune
     ${CMAKE_BINARY_DIR}/node_exporter/node_exporter
     ${CMAKE_BINARY_DIR}/debian
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-add_custom_target(dist-server-deb
+add_custom_target(dist-server-deb ALL
+  # the --builddir should match the paths specified by
+  # "packages" in dist/docker/debian/build_docker.sh
   COMMAND reloc/build_deb.sh
     --reloc-pkg ${unstripped_dist_pkg}
-    --builddir ${CMAKE_BINARY_DIR}/$<CONFIG>/debian
+    --builddir ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/debian
   DEPENDS ${unstripped_dist_pkg}
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-add_custom_target(dist-server-rpm
+add_custom_target(dist-server-rpm ALL
   COMMAND reloc/build_rpm.sh
     --reloc-pkg ${unstripped_dist_pkg}
-    --builddir ${CMAKE_CURRENT_BINARY_DIR}
+    --builddir ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/redhat
   DEPENDS ${unstripped_dist_pkg}
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_custom_target(dist-server
+  DEPENDS dist-server-deb dist-server-rpm)
 
 function(add_stripped name)
   # ${name} must be an absolute path
@@ -40,12 +45,17 @@ endfunction()
 add_stripped("${CMAKE_BINARY_DIR}/$<CONFIG>/scylla")
 
 # app_iotune is located in seastar/apps/iotune
-set(iotune_path "${CMAKE_BINARY_DIR}/$<CONFIG>/iotune")
+if(TARGET Seastar::iotune)
+  set(iotune_src "$<TARGET_FILE:Seastar::iotune>")
+else()
+  set(iotune_src "$<TARGET_FILE:app_iotune>")
+endif()
+set(iotune_dst "${CMAKE_BINARY_DIR}/$<CONFIG>/iotune")
 add_custom_command(
-  OUTPUT "${iotune_path}"
-  COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:app_iotune> "${iotune_path}"
-  DEPENDS app_iotune)
-add_stripped("${iotune_path}")
+  OUTPUT "${iotune_dst}"
+  COMMAND ${CMAKE_COMMAND} -E copy "${iotune_src}" "${iotune_dst}"
+  DEPENDS $<OUTPUT_CONFIG:${iotune_src}>)
+add_stripped("${iotune_dst}")
 
 find_program(TAR_COMMAND tar
   REQUIRED)
@@ -76,7 +86,7 @@ add_custom_command(
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 set(stripped_dist_pkg
-  "${CMAKE_CURRENT_BINARY_DIR}/${Scylla_PRODUCT}-${Scylla_VERSION}-${Scylla_RELEASE}.${CMAKE_SYSTEM_PROCESSOR}.tar.gz")
+  "${CMAKE_BINARY_DIR}/$<CONFIG>/dist/tar/${Scylla_PRODUCT}-${Scylla_VERSION}-${Scylla_RELEASE}.${CMAKE_SYSTEM_PROCESSOR}.tar.gz")
 add_custom_command(
   OUTPUT
     ${stripped_dist_pkg}
@@ -96,34 +106,38 @@ add_custom_command(
 add_custom_target(dist-server-tar
   DEPENDS ${stripped_dist_pkg})
 add_custom_target(package
-  ${CMAKE_COMMAND} -E copy ${stripped_dist_pkg} ${Scylla_PRODUCT}-package.tar.gz
+  ${CMAKE_COMMAND} -E copy ${stripped_dist_pkg} ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/${Scylla_PRODUCT}-package.tar.gz
   DEPENDS ${stripped_dist_pkg})
 
 
 set(dist_pkgs
   "${stripped_dist_pkg}")
-dist_submodule(cqlsh cqlsh dist_pkgs
-  NOARCH)
+dist_submodule(cqlsh cqlsh dist_pkgs)
 dist_submodule(tools java dist_pkgs
-  NOARCH)
-dist_submodule(jmx jmx dist_pkgs
   NOARCH)
 dist_submodule(python3 python3 dist_pkgs)
 set(unified_dist_pkg
-  "${CMAKE_CURRENT_BINARY_DIR}/${Scylla_PRODUCT}-unified-${Scylla_VERSION}-${Scylla_RELEASE}.${CMAKE_SYSTEM_PROCESSOR}.tar.gz")
+  "${CMAKE_BINARY_DIR}/$<CONFIG>/dist/tar/${Scylla_PRODUCT}-unified-${Scylla_VERSION}-${Scylla_RELEASE}.${CMAKE_SYSTEM_PROCESSOR}.tar.gz")
 add_custom_command(
   OUTPUT
     "${unified_dist_pkg}"
   COMMAND
     ${CMAKE_SOURCE_DIR}/unified/build_unified.sh
-      --build-dir ${CMAKE_BINARY_DIR}
+      --build-dir ${CMAKE_BINARY_DIR}/$<CONFIG>
       --pkgs "${dist_pkgs}"
       --unified-pkg ${unified_dist_pkg}
   DEPENDS
     ${dist_pkgs}
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   VERBATIM)
-add_custom_target(dist-unified
+add_custom_target(dist-unified ALL
   DEPENDS ${unified_dist_pkg})
+
+add_custom_target(dist)
+add_dependencies(dist
+  dist-cqlsh
+  dist-tools
+  dist-python3
+  dist-server)
 
 add_subdirectory(debuginfo)

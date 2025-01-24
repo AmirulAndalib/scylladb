@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 
@@ -65,5 +65,5 @@ auto fmt::formatter<tombstone_gc_mode>::format(tombstone_gc_mode mode, fmt::form
     case tombstone_gc_mode::immediate:   name = "immediate"; break;
     case tombstone_gc_mode::repair:      name = "repair"; break;
     }
-    return formatter<std::string_view>::format(name, ctx);
+    return formatter<string_view>::format(name, ctx);
 }

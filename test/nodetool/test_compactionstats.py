@@ -1,13 +1,13 @@
 #
 # Copyright 2024-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
 import pytest
 from datetime import timedelta
 from uuid import uuid1
-from rest_api_mock import expected_request
+from test.nodetool.rest_api_mock import expected_request
 
 
 def create_task(i, num_pending_tasks):
@@ -65,7 +65,8 @@ def test_compactionstats(nodetool, request, num_compactions, throughput):
         expected_requests.append(
             expected_request("GET", "/storage_service/compaction_throughput",
                              response=throughput))
-    actual_output = nodetool("compactionstats", expected_requests=expected_requests)
+    res = nodetool("compactionstats", expected_requests=expected_requests)
+    actual_output = res.stdout
     expected_output = f"pending tasks: {num_compactions}\n"
     for task in pending_tasks:
         expected_output += format_task(task)

@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
@@ -26,7 +26,6 @@ namespace auth {
 
 class default_authorizer : public authorizer {
     cql3::query_processor& _qp;
-    ::service::raft_group0_client& _group0_client;
 
     ::service::migration_manager& _migration_manager;
 
@@ -47,19 +46,21 @@ public:
 
     virtual future<permission_set> authorize(const role_or_anonymous&, const resource&) const override;
 
-    virtual future<> grant(std::string_view, permission_set, const resource&) override;
+    virtual future<> grant(std::string_view, permission_set, const resource&, ::service::group0_batch&) override;
 
-    virtual future<> revoke( std::string_view, permission_set, const resource&) override;
+    virtual future<> revoke( std::string_view, permission_set, const resource&, ::service::group0_batch&) override;
 
     virtual future<std::vector<permission_details>> list_all() const override;
 
-    virtual future<> revoke_all(std::string_view) override;
+    virtual future<> revoke_all(std::string_view, ::service::group0_batch&) override;
 
-    virtual future<> revoke_all(const resource&) override;
+    virtual future<> revoke_all(const resource&, ::service::group0_batch&) override;
 
     virtual const resource_set& protected_resources() const override;
 
 private:
+    future<> start_legacy();
+
     bool legacy_metadata_exists() const;
 
     future<> revoke_all_legacy(const resource&);
@@ -68,7 +69,9 @@ private:
 
     future<> migrate_legacy_metadata();
 
-    future<> modify(std::string_view, permission_set, const resource&, std::string_view);
+    future<> modify(std::string_view, permission_set, const resource&, std::string_view, ::service::group0_batch&);
+
+    void revoke_all_keyspace_resources(const resource& ks_resource, ::service::group0_batch& mc);
 };
 
 } /* namespace auth */

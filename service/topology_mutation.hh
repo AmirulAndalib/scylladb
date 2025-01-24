@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -114,8 +114,10 @@ public:
     topology_mutation_builder& set_tablet_balancing_enabled(bool);
     topology_mutation_builder& set_new_cdc_generation_data_uuid(const utils::UUID& value);
     topology_mutation_builder& set_committed_cdc_generations(const std::vector<cdc::generation_id_v2>& values);
+    topology_mutation_builder& set_new_keyspace_rf_change_data(const sstring &ks_name, const std::map<sstring, sstring> &rf_per_dc);
     topology_mutation_builder& set_unpublished_cdc_generations(const std::vector<cdc::generation_id_v2>& values);
     topology_mutation_builder& set_global_topology_request(global_topology_request);
+    topology_mutation_builder& set_global_topology_request_id(const utils::UUID&);
     topology_mutation_builder& set_upgrade_state(topology::upgrade_state_type);
     topology_mutation_builder& add_enabled_features(const std::set<sstring>& value);
     topology_mutation_builder& add_ignored_nodes(const std::unordered_set<raft::server_id>& value);
@@ -124,6 +126,7 @@ public:
     topology_mutation_builder& del_transition_state();
     topology_mutation_builder& del_session();
     topology_mutation_builder& del_global_topology_request();
+    topology_mutation_builder& del_global_topology_request_id();
     topology_node_mutation_builder& with_node(raft::server_id);
     canonical_mutation build() { return canonical_mutation{std::move(_m)}; }
 };
@@ -135,6 +138,7 @@ class topology_request_tracking_mutation_builder :
     mutation _m;
     api::timestamp_type _ts;
     deletable_row& _r;
+    bool _set_type;
 
 public:
     row& row();
@@ -142,10 +146,12 @@ public:
     api::timestamp_type timestamp() const;
     ttl_opt ttl() const;
 
-    topology_request_tracking_mutation_builder(utils::UUID id);
+    topology_request_tracking_mutation_builder(utils::UUID id, bool set_type = false);
     using builder_base::set;
     using builder_base::del;
+    topology_request_tracking_mutation_builder& set(const char* cell, topology_request value);
     topology_request_tracking_mutation_builder& done(std::optional<sstring> error = std::nullopt);
+    topology_request_tracking_mutation_builder& set_truncate_table_data(const table_id& table_id);
     canonical_mutation build() { return canonical_mutation{std::move(_m)}; }
 };
 

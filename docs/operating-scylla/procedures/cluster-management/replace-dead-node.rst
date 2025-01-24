@@ -1,8 +1,6 @@
 Replace a Dead Node in a ScyllaDB Cluster 
 ******************************************
 
-.. scylladb_include_flag:: upgrade-note-replace-node.rst
-
 Replace dead node operation will cause the other nodes in the cluster to stream data to the node that was replaced. This operation can take some time (depending on the data size and network bandwidth).
 
 This procedure is for replacing one dead node. You can replace more than one dead node in parallel.
@@ -48,13 +46,13 @@ Login to one of the nodes in the cluster with the UN status. Collect the followi
   * cluster_name - ``cat /etc/scylla/scylla.yaml | grep cluster_name``
   * seeds - ``cat /etc/scylla/scylla.yaml | grep seeds:``
   * endpoint_snitch - ``cat /etc/scylla/scylla.yaml | grep endpoint_snitch``
-  * Scylla version - ``scylla --version``
+  * ScyllaDB version - ``scylla --version``
 
 ---------
 Procedure
 ---------
 
-#. Install Scylla on a new node, see :doc:`Getting Started</getting-started/index>` for further instructions. Follow the Scylla install procedure up to ``scylla.yaml`` configuration phase. Ensure that the Scylla version of the new node is identical to the other nodes in the cluster. 
+#. Install ScyllaDB on a new node, see :doc:`Getting Started</getting-started/index>` for further instructions. Follow the ScyllaDB install procedure up to ``scylla.yaml`` configuration phase. Ensure that the ScyllaDB version of the new node is identical to the other nodes in the cluster. 
 
    .. include:: /operating-scylla/procedures/cluster-management/_common/match_version.rst
 
@@ -62,13 +60,13 @@ Procedure
 
     - **cluster_name** - Set the selected cluster_name
  
-    - **listen_address** - IP address that Scylla uses to connect to other Scylla nodes in the cluster
+    - **listen_address** - IP address that ScyllaDB uses to connect to other ScyllaDB nodes in the cluster
 
     - **seeds** - Set the seed nodes
 
     - **endpoint_snitch** - Set the selected snitch
 
-    - **rpc_address** - Address for client connection (Thrift, CQL)
+    - **rpc_address** - Address for CQL client connection
 
 #. Add the ``replace_node_first_boot`` parameter to the ``scylla.yaml`` config file on the new node. This line can be added to any place in the config file. After a successful node replacement, there is no need to remove it from the ``scylla.yaml`` file. (Note: The obsolete parameters "replace_address" and "replace_address_first_boot" are not supported and should not be used). The value of the ``replace_node_first_boot`` parameter should be the Host ID of the node to be replaced.
 
@@ -149,7 +147,7 @@ Procedure
        UN  192.168.1.202  91.11 KB   256     32.9%             125ed9f4-7777-1dbn-mac8-43fddce9123e   B1
        UN  192.168.1.204  124.42 KB  256     32.6%             655ae64d-e3fb-45cc-9792-2b648b151b67   B1 
 
-#. Run the ``nodetool repair`` command on the node that was replaced to make sure that the data is synced with the other nodes in the cluster. You can use `Scylla Manager <https://manager.docs.scylladb.com/>`_ to run the repair.
+#. Run the ``nodetool repair`` command on the node that was replaced to make sure that the data is synced with the other nodes in the cluster. You can use `ScyllaDB Manager <https://manager.docs.scylladb.com/>`_ to run the repair.
 
     .. note:: 
        When :doc:`Repair Based Node Operations (RBNO) <repair-based-node-operation>` for **replace** is enabled, there is no need to rerun repair.
@@ -166,7 +164,7 @@ In case you need to to restart (stop + start, not reboot) an instance with ephem
 
 In this case, the node's data will be cleaned after restart. To remedy this, you need to recreate the RAID again.
 
-#. Stop the Scylla server on the node you restarted. The rest of the commands will run on this node as well.
+#. Stop the ScyllaDB server on the node you restarted. The rest of the commands will run on this node as well.
 
    .. include:: /rst_include/scylla-commands-stop-index.rst
 
@@ -188,13 +186,9 @@ In this case, the node's data will be cleaned after restart. To remedy this, you
 
       sudo /opt/scylladb/scylla-machine-image/scylla_create_devices
 
-#. Start Scylla Server
+#. Start ScyllaDB Server
 
-   .. include:: /rst_include/scylla-commands-stop-index.rst
+   .. include:: /rst_include/scylla-commands-start-index.rst
 
 Sometimes the public/ private IP of instance is changed after restart. If so refer to the Replace Procedure_ above.
 
-
-.. _replace-node-upgrade-info:
-
-.. scylladb_include_flag:: upgrade-warning-replace-node.rst

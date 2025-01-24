@@ -3,10 +3,12 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+#include <seastar/core/with_scheduling_group.hh>
 #include <seastar/net/dns.hh>
+
 #include "controller.hh"
 #include "server.hh"
 #include "executor.hh"
@@ -32,8 +34,10 @@ controller::controller(
         sharded<service::memory_limiter>& memory_limiter,
         sharded<auth::service>& auth_service,
         sharded<qos::service_level_controller>& sl_controller,
-        const db::config& config)
-    : _gossiper(gossiper)
+        const db::config& config,
+        seastar::scheduling_group sg)
+    : protocol_server(sg)
+    , _gossiper(gossiper)
     , _proxy(proxy)
     , _mm(mm)
     , _sys_dist_ks(sys_dist_ks)
@@ -62,7 +66,9 @@ std::vector<socket_address> controller::listen_addresses() const {
 }
 
 future<> controller::start_server() {
-    return seastar::async([this] {
+    seastar::thread_attributes attr;
+    attr.sched_group = _sched_group;
+    return seastar::async(std::move(attr), [this] {
         _listen_addresses.clear();
 
         auto preferred = _config.listen_interface_prefer_ipv6() ? std::make_optional(net::inet_address::family::INET6) : std::nullopt;
@@ -126,10 +132,10 @@ future<> controller::start_server() {
                 std::throw_with_nested(std::runtime_error("Failed to set up Alternator TLS credentials"));
             }
         }
-        bool alternator_enforce_authorization = _config.alternator_enforce_authorization();
         _server.invoke_on_all(
-                [this, addr, alternator_port, alternator_https_port, creds = std::move(creds), alternator_enforce_authorization] (server& server) mutable {
-            return server.init(addr, alternator_port, alternator_https_port, creds, alternator_enforce_authorization,
+                [this, addr, alternator_port, alternator_https_port, creds = std::move(creds)] (server& server) mutable {
+            return server.init(addr, alternator_port, alternator_https_port, creds,
+                    _config.alternator_enforce_authorization,
                     &_memory_limiter.local().get_semaphore(),
                     _config.max_concurrent_requests_per_shard);
         }).handle_exception([this, addr, alternator_port, alternator_https_port] (std::exception_ptr ep) {
@@ -156,7 +162,9 @@ future<> controller::stop_server() {
 }
 
 future<> controller::request_stop_server() {
-    return stop_server();
+    return with_scheduling_group(_sched_group, [this] {
+        return stop_server();
+    });
 }
 
 }

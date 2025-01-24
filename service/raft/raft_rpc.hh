@@ -3,12 +3,12 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 #pragma once
 
 #include <seastar/core/gate.hh>
-#include "seastar/util/std-compat.hh"
+#include <seastar/util/std-compat.hh>
 #include "raft/raft.hh"
 #include "message/messaging_service_fwd.hh"
 #include "utils/UUID.hh"
@@ -28,12 +28,11 @@ protected:
     raft::group_id _group_id;
     raft::server_id _my_id;                     // Raft server id of this node.
     netw::messaging_service& _messaging;
-    raft_address_map& _address_map;
     shared_ptr<raft::failure_detector> _failure_detector;
     seastar::gate _shutdown_gate;
 
     explicit raft_rpc(raft_state_machine& sm, netw::messaging_service& ms,
-            raft_address_map& address_map, shared_ptr<raft::failure_detector> failure_detector, raft::group_id gid, raft::server_id my_id);
+             shared_ptr<raft::failure_detector> failure_detector, raft::group_id gid, raft::server_id my_id);
 
 private:
     enum class one_way_kind { request, reply };

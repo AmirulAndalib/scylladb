@@ -3,11 +3,12 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "auth/permissions_cache.hh"
 
+#include <fmt/ranges.h>
 #include "auth/authorizer.hh"
 #include "auth/service.hh"
 

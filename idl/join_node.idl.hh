@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 namespace service {
@@ -29,6 +29,7 @@ struct join_node_request_params {
     sstring rack;
     sstring release_version;
     uint32_t num_tokens;
+    sstring tokens_string;
     uint32_t shard_count;
     uint32_t ignore_msb;
     std::vector<sstring> supported_features;

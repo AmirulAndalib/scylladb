@@ -5,12 +5,11 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
 
-#include "utils/serialization.hh"
 #include "gms/gossip_digest.hh"
 #include "gms/inet_address.hh"
 #include "gms/endpoint_state.hh"
@@ -54,6 +53,6 @@ public:
 
 }
 
-template <> struct fmt::formatter<gms::gossip_digest_ack> : fmt::formatter<std::string_view> {
+template <> struct fmt::formatter<gms::gossip_digest_ack> : fmt::formatter<string_view> {
     auto format(const gms::gossip_digest_ack&, fmt::format_context& ctx) const -> decltype(ctx.out());
 };

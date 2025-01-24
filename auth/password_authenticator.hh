@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
@@ -64,13 +64,17 @@ public:
 
     virtual future<authenticated_user> authenticate(const credentials_map& credentials) const override;
 
-    virtual future<> create(std::string_view role_name, const authentication_options& options) override;
+    virtual future<> create(std::string_view role_name, const authentication_options& options, ::service::group0_batch& mc) override;
 
-    virtual future<> alter(std::string_view role_name, const authentication_options& options) override;
+    virtual future<> alter(std::string_view role_name, const authentication_options& options, ::service::group0_batch&) override;
 
-    virtual future<> drop(std::string_view role_name) override;
+    virtual future<> drop(std::string_view role_name, ::service::group0_batch&) override;
 
     virtual future<custom_options> query_custom_options(std::string_view role_name) const override;
+
+    virtual bool uses_password_hashes() const override;
+
+    virtual future<std::optional<sstring>> get_password_hash(std::string_view role_name) const override;
 
     virtual const resource_set& protected_resources() const override;
 

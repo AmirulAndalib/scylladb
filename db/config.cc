@@ -4,7 +4,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <unordered_map>
@@ -16,8 +16,11 @@
 #include <boost/program_options.hpp>
 #include <yaml-cpp/yaml.h>
 
+#include <fmt/ranges.h>
+
 #include <seastar/core/coroutine.hh>
-#include <seastar/core/print.hh>
+#include <seastar/core/format.hh>
+#include <seastar/json/json_elements.hh>
 #include <seastar/util/log.hh>
 #include <seastar/util/log-cli.hh>
 #include <seastar/net/tls.hh>
@@ -28,7 +31,7 @@
 #include "db/tags/extension.hh"
 #include "config.hh"
 #include "extensions.hh"
-#include "log.hh"
+#include "utils/log.hh"
 #include "service/tablet_allocator_fwd.hh"
 #include "utils/config_file_impl.hh"
 #include <seastar/core/metrics_api.hh>
@@ -72,9 +75,9 @@ hinted_handoff_enabled_to_json(const db::config::hinted_handoff_enabled_type& h)
     return value_to_json(h.to_configuration_string());
 }
 
-// Convert a value that can be printed with operator<<, or a vector of
+// Convert a value that can be printed with fmt::format, or a vector of
 // such values, to JSON. An example is enum_option<T>, because enum_option<T>
-// has a operator<<.
+// has a specialization for fmt::formatter.
 template <typename T>
 static json::json_return_type
 printable_to_json(const T& e) {
@@ -98,69 +101,168 @@ error_injection_list_to_json(const std::vector<db::config::error_injection_at_st
 }
 
 template <>
-const config_type config_type_for<bool> = config_type("bool", value_to_json<bool>);
+bool
+config_from_string(std::string_view value) {
+    // boost::lexical_cast doesn't accept true/false, which are our output representations
+    // for bools. We want round-tripping, so we need to accept true/false. For backward
+    // compatibility, we also accept 1/0. #19791.
+    if (value == "true" || value == "1") {
+        return true;
+    } else if (value == "false" || value == "0") {
+        return false;
+    } else {
+        throw boost::bad_lexical_cast(typeid(std::string_view), typeid(bool));
+    }
+}
 
 template <>
-const config_type config_type_for<uint16_t> = config_type("integer", value_to_json<uint16_t>);
+const config_type& config_type_for<bool>() {
+    static config_type ct("bool", value_to_json<bool>);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<uint32_t> = config_type("integer", value_to_json<uint32_t>);
+const config_type& config_type_for<uint16_t>() {
+    static config_type ct("integer", value_to_json<uint16_t>);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<uint64_t> = config_type("integer", value_to_json<uint64_t>);
+const config_type& config_type_for<uint32_t>() {
+    static config_type ct("integer", value_to_json<uint32_t>);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<float> = config_type("float", value_to_json<float>);
+const config_type& config_type_for<uint64_t>() {
+    static config_type ct("integer", value_to_json<uint64_t>);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<double> = config_type("double", value_to_json<double>);
+const config_type& config_type_for<float>() {
+    static config_type ct("float", value_to_json<float>);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<log_level> = config_type("string", log_level_to_json);
+const config_type& config_type_for<double>() {
+    static config_type ct("double", value_to_json<double>);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<sstring> = config_type("string", value_to_json<sstring>);
+const config_type& config_type_for<log_level>() {
+    static config_type ct("string", log_level_to_json);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<std::string> = config_type("string", value_to_json<std::string>);
+const config_type& config_type_for<sstring>() {
+    static config_type ct("string", value_to_json<sstring>);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<std::vector<sstring>> = config_type("string list", value_to_json<std::vector<sstring>>);
+const config_type& config_type_for<std::string>() {
+    static config_type ct("string", value_to_json<std::string>);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<std::unordered_map<sstring, sstring>> = config_type("string map", value_to_json<std::unordered_map<sstring, sstring>>);
+const config_type& config_type_for<std::vector<sstring>>() {
+    static config_type ct("string list", value_to_json<std::vector<sstring>>);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<std::vector<std::unordered_map<sstring, sstring>>> = config_type("string map list", value_to_json<std::vector<std::unordered_map<sstring, sstring>>>);
+const config_type& config_type_for<std::unordered_map<sstring, std::unordered_map<sstring, sstring>>>() {
+    static config_type ct("string map map", value_to_json<std::unordered_map<sstring, std::unordered_map<sstring, sstring>>>);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<std::unordered_map<sstring, log_level>> = config_type("string map", log_level_map_to_json);
+const config_type& config_type_for<std::unordered_map<sstring, sstring>>() {
+    static config_type ct("string map", value_to_json<std::unordered_map<sstring, sstring>>);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<int64_t> = config_type("integer", value_to_json<int64_t>);
+const config_type& config_type_for<std::vector<std::unordered_map<sstring, sstring>>>() {
+    static config_type ct("string map list", value_to_json<std::vector<std::unordered_map<sstring, sstring>>>);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<int32_t> = config_type("integer", value_to_json<int32_t>);
+const config_type& config_type_for<std::unordered_map<sstring, log_level>>() {
+    static config_type ct("string map", log_level_map_to_json);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<db::seed_provider_type> = config_type("seed provider", seed_provider_to_json);
+const config_type& config_type_for<int64_t>() {
+    static config_type ct("integer", value_to_json<int64_t>);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<std::vector<enum_option<db::experimental_features_t>>> = config_type(
+const config_type& config_type_for<int32_t>() {
+    static config_type ct("integer", value_to_json<int32_t>);
+    return ct;
+}
+
+template <>
+const config_type& config_type_for<db::seed_provider_type>() {
+    static config_type ct("seed provider", seed_provider_to_json);
+    return ct;
+}
+
+template <>
+const config_type& config_type_for<std::vector<enum_option<db::experimental_features_t>>>() {
+    static config_type ct(
         "experimental features", printable_vector_to_json<enum_option<db::experimental_features_t>>);
+    return ct;
+}
+
 template <>
-const config_type config_type_for<std::vector<enum_option<db::replication_strategy_restriction_t>>> = config_type(
+const config_type& config_type_for<std::vector<enum_option<db::replication_strategy_restriction_t>>>() {
+    static config_type ct(
         "replication strategy list", printable_vector_to_json<enum_option<db::replication_strategy_restriction_t>>);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<enum_option<db::tri_mode_restriction_t>> = config_type(
+const config_type& config_type_for<enum_option<db::tri_mode_restriction_t>>() {
+    static config_type ct(
         "restriction mode", printable_to_json<enum_option<db::tri_mode_restriction_t>>);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<db::config::hinted_handoff_enabled_type> = config_type("hinted handoff enabled", hinted_handoff_enabled_to_json);
+const config_type& config_type_for<db::config::hinted_handoff_enabled_type>() {
+    static config_type ct("hinted handoff enabled", hinted_handoff_enabled_to_json);
+    return ct;
+}
 
 template <>
-const config_type config_type_for<std::vector<db::config::error_injection_at_startup>> = config_type("error injection list", error_injection_list_to_json);
+const config_type& config_type_for<std::vector<db::config::error_injection_at_startup>>() {
+    static config_type ct("error injection list", error_injection_list_to_json);
+    return ct;
+}
+
+template <>
+const config_type& config_type_for<enum_option<utils::dict_training_loop::when>>() {
+    static config_type ct(
+        "dictionary training conditions", printable_to_json<enum_option<utils::dict_training_loop::when>>);
+    return ct;
+}
+
+template <>
+const config_type& config_type_for<utils::advanced_rpc_compressor::tracker::algo_config>() {
+    static config_type ct(
+        "advanced rpc compressor config", printable_vector_to_json<enum_option<compression_algorithm>>);
+    return ct;
+}
 
 }
 
@@ -175,7 +277,7 @@ struct convert<seastar::log_level> {
         if (!convert<std::string>::decode(node, tmp)) {
             return false;
         }
-        rhs = boost::lexical_cast<seastar::log_level>(tmp);
+        rhs = utils::config_from_string<seastar::log_level>(tmp);
         return true;
     }
 };
@@ -284,12 +386,49 @@ struct convert<db::config::error_injection_at_startup> {
                     rhs.name = n.second.as<sstring>();
                 } else if (key == "one_shot") {
                     rhs.one_shot = n.second.as<bool>();
+                } else {
+                    rhs.parameters.insert({key, n.second.as<sstring>()});
                 }
             }
             return !rhs.name.empty();
         } else {
             return false;
         }
+    }
+};
+
+
+template <>
+class convert<enum_option<utils::dict_training_loop::when>> {
+public:
+    static bool decode(const Node& node, enum_option<utils::dict_training_loop::when>& rhs) {
+        std::string name;
+        if (!convert<std::string>::decode(node, name)) {
+            return false;
+        }
+        try {
+            std::istringstream(name) >> rhs;
+        } catch (boost::program_options::invalid_option_value&) {
+            return false;
+        }
+        return true;
+    }
+};
+
+template <>
+class convert<enum_option<utils::compression_algorithm>> {
+public:
+    static bool decode(const Node& node, enum_option<utils::compression_algorithm>& rhs) {
+        std::string name;
+        if (!convert<std::string>::decode(node, name)) {
+            return false;
+        }
+        try {
+            std::istringstream(name) >> rhs;
+        } catch (boost::program_options::invalid_option_value&) {
+            return false;
+        }
+        return true;
     }
 };
 
@@ -337,11 +476,13 @@ static std::vector<sstring> experimental_feature_names() {
 // created on-the-fly below with format(). Instead, we need to save the
 // help string to a static object, and return a string_view to it:
 static std::string_view experimental_features_help_string() {
-    static sstring s = format("Unlock experimental features provided as the "
+    static sstring s = seastar::format("Unlock experimental features provided as the "
         "option arguments (possible values: {}). Can be repeated.",
         experimental_feature_names());
     return s;
 }
+
+using namespace std::chrono_literals;
 
 db::config::config(std::shared_ptr<db::extensions> exts)
     : utils::config_file()
@@ -412,16 +553,16 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     */
     , commit_failure_policy(this, "commit_failure_policy", value_status::Unused, "stop",
         "Policy for commit disk failures:\n"
-        "* die          Shut down gossip and Thrift and kill the JVM, so the node can be replaced.\n"
-        "* stop         Shut down gossip and Thrift, leaving the node effectively dead, but can be inspected using JMX.\n"
+        "* die          Shut down gossip, so the node can be replaced.\n"
+        "* stop         Shut down gossip, leaving the node effectively dead, but can be inspected using the RESTful APIs.\n"
         "* stop_commit  Shut down the commit log, letting writes collect but continuing to service reads (as in pre-2.0.5 Cassandra).\n"
         "* ignore       Ignore fatal errors and let the batches fail."
         , {"die", "stop", "stop_commit", "ignore"})
     , disk_failure_policy(this, "disk_failure_policy", value_status::Unused, "stop",
         "Sets how Scylla responds to disk failure. Recommend settings are stop or best_effort.\n"
-        "* die              Shut down gossip and Thrift and kill the JVM for any file system errors or single SSTable errors, so the node can be replaced.\n"
-        "* stop_paranoid    Shut down gossip and Thrift even for single SSTable errors.\n"
-        "* stop             Shut down gossip and Thrift, leaving the node effectively dead, but available for inspection using JMX.\n"
+        "* die              Shut down gossip for any file system errors or single SSTable errors, so the node can be replaced.\n"
+        "* stop_paranoid    Shut down gossip even for single SSTable errors.\n"
+        "* stop             Shut down gossip, leaving the node effectively dead, but available for inspection using the RESTful APIs.\n"
         "* best_effort      Stop using the failed disk and respond to requests based on the remaining available SSTables. This means you will see obsolete data at consistency level of ONE.\n"
         "* ignore           Ignores fatal errors and lets the requests fail; all file system errors are logged but otherwise ignored. Scylla acts as in versions prior to Cassandra 1.2.\n"
         "Related information: Handling Disk Failures In Cassandra 1.2 blog and Recovering from a single disk failure using JBOD.\n"
@@ -438,7 +579,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "\n"
         "Related information: Snitches\n")
     , rpc_address(this, "rpc_address", value_status::Used, "localhost",
-        "The listen address for client connections (Thrift RPC service and native transport).Valid values are:\n"
+        "The listen address for client connections (native transport).Valid values are:\n"
         "* unset: Resolves the address using the hostname configuration of the node. If left unset, the hostname must resolve to the IP address of this node using /etc/hostname, /etc/hosts, or DNS.\n"
         "* 0.0.0.0: Listens on all configured interfaces, but you must set the broadcast_rpc_address to a value other than 0.0.0.0.\n"
         "* IP address\n"
@@ -511,6 +652,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "\n"
         "Related information: Failure detection and recovery")
     , failure_detector_timeout_in_ms(this, "failure_detector_timeout_in_ms", liveness::LiveUpdate, value_status::Used, 20 * 1000, "Maximum time between two successful echo message before gossip mark a node down in milliseconds.\n")
+    , direct_failure_detector_ping_timeout_in_ms(this, "direct_failure_detector_ping_timeout_in_ms", value_status::Used, 600, "Duration after which the direct failure detector aborts a ping message, so the next ping can start.\n"
+        "Note: this failure detector is used by Raft, and is different from gossiper's failure detector (configured by `failure_detector_timeout_in_ms`).\n")
     /**
     * @Group Performance tuning properties
     * @GroupDescription Tuning performance and system resource utilization, including commit log, compaction, memory, disk I/O, CPU, reads, and writes.
@@ -538,6 +681,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     /* Note: does not exist on the listing page other than in above comment, wtf? */
     , commitlog_sync_batch_window_in_ms(this, "commitlog_sync_batch_window_in_ms", value_status::Used, 10000,
         "Controls how long the system waits for other writes before performing a sync in ``batch`` mode.")
+    , commitlog_max_data_lifetime_in_seconds(this, "commitlog_max_data_lifetime_in_seconds", liveness::LiveUpdate, value_status::Used, 24*60*60,
+        "Controls how long data remains in commit log before the system tries to evict it to sstable, regardless of usage pressure. (0 disables)")
     , commitlog_total_space_in_mb(this, "commitlog_total_space_in_mb", value_status::Used, -1,
         "Total space used for commitlogs. If the used space goes above this value, Scylla rounds up to the next nearest segment multiple and flushes memtables to disk for the oldest commitlog segments, removing those log segments. This reduces the amount of data to replay on startup, and prevents infrequently-updated tables from indefinitely keeping commitlog segments. A small total commitlog space tends to cause more flush activity on less-active tables.\n"
         "\n"
@@ -549,8 +694,10 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "Threshold for commitlog disk usage. When used disk space goes above this value, Scylla initiates flushes of memtables to disk for the oldest commitlog segments, removing those log segments. Adjusting this affects disk usage vs. write latency. Default is (approximately) commitlog_total_space_in_mb - <num shards>*commitlog_segment_size_in_mb.")
     , commitlog_use_o_dsync(this, "commitlog_use_o_dsync", value_status::Used, true,
         "Whether or not to use O_DSYNC mode for commitlog segments IO. Can improve commitlog latency on some file systems.\n")
-    , commitlog_use_hard_size_limit(this, "commitlog_use_hard_size_limit", value_status::Used, true,
-        "Whether or not to use a hard size limit for commitlog disk usage. Default is true. Enabling this can cause latency spikes, whereas the default can lead to occasional disk usage peaks.\n")
+    , commitlog_use_hard_size_limit(this, "commitlog_use_hard_size_limit", value_status::Deprecated, true,
+        "Whether or not to use a hard size limit for commitlog disk usage. Default is true. Enabling this can cause latency spikes, whereas disabling this can lead to occasional disk usage peaks.\n")
+    , commitlog_use_fragmented_entries(this, "commitlog_use_fragmented_entries", value_status::Used, true,
+        "Whether or not to allow commitlog entries to fragment across segments, allowing for larger entry sizes.\n")
     /**
     * @Group Compaction settings
     * @GroupDescription Related information: Configuring compaction
@@ -707,6 +854,9 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , query_page_size_in_bytes(this, "query_page_size_in_bytes", liveness::LiveUpdate, value_status::Used, 1 << 20,
         "The size of pages in bytes, after a page accumulates this much data, the page is cut and sent to the client."
         " Setting a too large value increases the risk of OOM.")
+    , group0_tombstone_gc_refresh_interval_in_ms(this, "group0_tombstone_gc_refresh_interval_in_ms", value_status::Used,
+              std::chrono::duration_cast<std::chrono::milliseconds>(60min).count(),
+              "The interval in milliseconds at which we update the time point for safe tombstone expiration in group0 tables.")
     /**
     * @Group Network timeout settings
     */
@@ -746,9 +896,42 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "Sets the receiving socket buffer size in bytes for inter-node calls.")
     , internode_compression(this, "internode_compression", value_status::Used, "none",
         "Controls whether traffic between nodes is compressed. The valid values are:\n"
-        "* all: All traffic is compressed.\n"
-        "* dc: Traffic between data centers is compressed.\n"
-        "* none: No compression.")
+        "\tall: All traffic is compressed.\n"
+        "\tdc : Traffic between data centers is compressed.\n"
+        "\tnone : No compression.")
+    , internode_compression_zstd_max_cpu_fraction(this, "internode_compression_zstd_max_cpu_fraction", liveness::LiveUpdate, value_status::Used, 0.000,
+        "ZSTD compression of RPC will consume at most this fraction of each internode_compression_zstd_quota_refresh_period_ms time slice.\n"
+        "If you wish to try out zstd for RPC compression, 0.05 is a reasonable starting point.")
+    , internode_compression_zstd_cpu_quota_refresh_period_ms(this, "internode_compression_zstd_cpu_quota_refresh_period_ms", liveness::LiveUpdate, value_status::Used, 20,
+        "Advanced. ZSTD compression of RPC will consume at most internode_compression_zstd_max_cpu_fraction (plus one message) of in each time slice of this length.")
+    , internode_compression_zstd_max_longterm_cpu_fraction(this, "internode_compression_zstd_max_longterm_cpu_fraction", liveness::LiveUpdate, value_status::Used, 1.000,
+        "ZSTD compression of RPC will consume at most this fraction of each internode_compression_zstd_longterm_cpu_quota_refresh_period_ms time slice.")
+    , internode_compression_zstd_longterm_cpu_quota_refresh_period_ms(this, "internode_compression_zstd_longterm_cpu_quota_refresh_period_ms", liveness::LiveUpdate, value_status::Used, 10000,
+        "Advanced. ZSTD compression of RPC will consume at most internode_compression_zstd_max_longterm_cpu_fraction (plus one message) of in each time slice of this length.")
+    , internode_compression_zstd_min_message_size(this, "internode_compression_zstd_min_message_size", liveness::LiveUpdate, value_status::Used, 1024,
+        "Minimum RPC message size which can be compressed with ZSTD. Messages smaller than this threshold will always be compressed with LZ4. "
+        "ZSTD has high per-message overhead, and might be a bad choice for small messages. This knob allows for some experimentation with that. ")
+    , internode_compression_zstd_max_message_size(this, "internode_compression_zstd_max_message_size", liveness::LiveUpdate, value_status::Used, std::numeric_limits<uint32_t>::max(),
+        "Maximum RPC message size which can be compressed with ZSTD. RPC messages might be large, but they are always compressed at once. This might cause reactor stalls. "
+        "If this happens, this option can be used to make the stalls less severe.")
+    , internode_compression_checksumming(this, "internode_compression_checksumming", liveness::LiveUpdate, value_status::Used, true,
+        "Computes and checks checksums for compressed RPC frames. This is a paranoid precaution against corruption bugs in the compression protocol.")
+    , internode_compression_algorithms(this, "internode_compression_algorithms", liveness::LiveUpdate, value_status::Used,
+            { utils::compression_algorithm::type::ZSTD, utils::compression_algorithm::type::LZ4, },
+        "Specifies RPC compression algorithms supported by this node. ")
+    , internode_compression_enable_advanced(this, "internode_compression_enable_advanced", liveness::MustRestart, value_status::Used, false,
+        "Enables the new implementation of RPC compression. If disabled, Scylla will fall back to the old implementation.")
+    , rpc_dict_training_when(this, "rpc_dict_training_when", liveness::LiveUpdate, value_status::Used, utils::dict_training_loop::when::type::NEVER,
+        "Specifies when RPC compression dictionary training is performed by this node.\n"
+        "* `never` disables it unconditionally.\n"
+        "* `when_leader` enables it only whenever the node is the Raft leader.\n"
+        "* `always` (not recommended) enables it unconditionally.\n"
+        "\n"
+        "Training shouldn't be enabled on more than one node at a time, because overly-frequent dictionary announcements might indefinitely delay nodes from agreeing on a new dictionary.")
+    , rpc_dict_training_min_time_seconds(this, "rpc_dict_training_min_time_seconds", liveness::LiveUpdate, value_status::Used, 3600,
+        "Specifies the minimum duration of RPC compression dictionary training.")
+    , rpc_dict_training_min_bytes(this, "rpc_dict_training_min_bytes", liveness::LiveUpdate, value_status::Used, 1'000'000'000,
+        "Specifies the minimum volume of RPC compression dictionary training.")
     , inter_dc_tcp_nodelay(this, "inter_dc_tcp_nodelay", value_status::Used, false,
         "Enable or disable tcp_nodelay for inter-data center communication. When disabled larger, but fewer, network packets are sent. This reduces overhead from the TCP protocol itself. However, if cross data-center responses are blocked, it will increase latency.")
     , streaming_socket_timeout_in_ms(this, "streaming_socket_timeout_in_ms", value_status::Unused, 0,
@@ -793,26 +976,12 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     */
     , broadcast_rpc_address(this, "broadcast_rpc_address", value_status::Used, {/* unset */},
         "RPC address to broadcast to drivers and other Scylla nodes. This cannot be set to 0.0.0.0. If blank, it is set to the value of the rpc_address or rpc_interface. If rpc_address or rpc_interfaceis set to 0.0.0.0, this property must be set.\n")
-    , rpc_port(this, "rpc_port", "thrift_port", value_status::Used, 9160,
+    , rpc_port(this, "rpc_port", "thrift_port", value_status::Unused, 0,
         "Thrift port for client connections.")
-    , start_rpc(this, "start_rpc", value_status::Used, false,
+    , start_rpc(this, "start_rpc", value_status::Unused, false,
         "Starts the Thrift RPC server")
     , rpc_keepalive(this, "rpc_keepalive", value_status::Used, true,
-        "Enable or disable keepalive on client connections (RPC or native).")
-    , rpc_max_threads(this, "rpc_max_threads", value_status::Invalid, 0,
-        "Regardless of your choice of RPC server (rpc_server_type), the number of maximum requests in the RPC thread pool dictates how many concurrent requests are possible. However, if you are using the parameter sync in the rpc_server_type, it also dictates the number of clients that can be connected. For a large number of client connections, this could cause excessive memory usage for the thread stack. Connection pooling on the client side is highly recommended. Setting a maximum thread pool size acts as a safeguard against misbehaved clients. If the maximum is reached, Cassandra blocks additional connections until a client disconnects.")
-    , rpc_min_threads(this, "rpc_min_threads", value_status::Invalid, 16,
-        "Sets the minimum thread pool size for remote procedure calls.")
-    , rpc_recv_buff_size_in_bytes(this, "rpc_recv_buff_size_in_bytes", value_status::Unused, 0,
-        "Sets the receiving socket buffer size for remote procedure calls.")
-    , rpc_send_buff_size_in_bytes(this, "rpc_send_buff_size_in_bytes", value_status::Unused, 0,
-        "Sets the sending socket buffer size in bytes for remote procedure calls.")
-    , rpc_server_type(this, "rpc_server_type", value_status::Unused, "sync",
-        "Cassandra provides three options for the RPC server. On Windows, sync is about 30% slower than hsha. On Linux, sync and hsha performance is about the same, but hsha uses less memory.\n"
-        "* sync    (Default One thread per Thrift connection.) For a very large number of clients, memory is the limiting factor. On a 64-bit JVM, 180KB is the minimum stack size per thread and corresponds to your use of virtual memory. Physical memory may be limited depending on use of stack space.\n"
-        "* hsh      Half synchronous, half asynchronous. All Thrift clients are handled asynchronously using a small number of threads that does not vary with the number of clients and thus scales well to many clients. The RPC requests are synchronous (one thread per active request).\n"
-        "*         Note: When selecting this option, you must change the default value (unlimited) of rpc_max_threads.\n"
-        "* Your own RPC server: You must provide a fully-qualified class name of an o.a.c.t.TServerFactory that can create a server instance.")
+        "Enable or disable keepalive on client connections (CQL native, Redis and the maintenance socket).")
     , cache_hit_rate_read_balancing(this, "cache_hit_rate_read_balancing", value_status::Used, true,
         "This boolean controls whether the replicas for read query will be chosen based on cache hit ratio.")
     /**
@@ -841,6 +1010,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "Number of threads with which to deliver hints. In multiple data-center deployments, consider increasing this number because cross data-center handoff is generally slower.")
     , batchlog_replay_throttle_in_kb(this, "batchlog_replay_throttle_in_kb", value_status::Unused, 1024,
         "Total maximum throttle. Throttling is reduced proportionally to the number of nodes in the cluster.")
+    , batchlog_replay_cleanup_after_replays(this, "batchlog_replay_cleanup_after_replays", liveness::LiveUpdate, value_status::Used, 60,
+        "Clean up batchlog memtable after every N replays. Replays are issued on a timer, every 60 seconds. So if batchlog_replay_cleanup_after_replays is set to 60, the batchlog memtable is flushed every 60 * 60 seconds.")
     /**
     * @Group Request scheduler properties
     * @GroupDescription Settings to handle incoming client requests according to a defined policy. If you need to use these properties, your nodes are overloaded and dropping requests. It is recommended that you add more nodes and not try to prioritize requests.
@@ -859,14 +1030,6 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "* default_weight: (Default: 1 **)  How many requests are handled during each turn of the RoundRobin.\n"
         "* weights: (Default: Keyspace: 1)  Takes a list of keyspaces. It sets how many requests are handled during each turn of the RoundRobin, based on the request_scheduler_id.")
     /**
-    * @Group Thrift interface properties
-    * @GroupDescription Legacy API for older clients. CQL is a simpler and better API for Scylla.
-    */
-    , thrift_framed_transport_size_in_mb(this, "thrift_framed_transport_size_in_mb", value_status::Unused, 15,
-        "Frame size (maximum field length) for Thrift. The frame is the row or part of the row the application is inserting.")
-    , thrift_max_message_length_in_mb(this, "thrift_max_message_length_in_mb", value_status::Used, 16,
-        "The maximum length of a Thrift message in megabytes, including all fields and internal Thrift overhead (1 byte of overhead for each frame). Message length is usually used in conjunction with batches. A frame length greater than or equal to 24 accommodates a batch with four inserts, each of which is 24 bytes. The required message length is greater than or equal to 24+24+24+24+4 (number of frames).")
-    /**
     * @Group Security properties
     * @GroupDescription Server and client security settings.
     */
@@ -876,9 +1039,10 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "* org.apache.cassandra.auth.PasswordAuthenticator: Authenticates users with user names and hashed passwords stored in the system_auth.credentials table. If you use the default, 1, and the node with the lone replica goes down, you will not be able to log into the cluster because the system_auth keyspace was not replicated.\n"
         "* com.scylladb.auth.CertificateAuthenticator: Authenticates users based on TLS certificate authentication subject. Roles and permissions still need to be defined as normal. Super user can be set using the 'auth_superuser_name' configuration value. Query to extract role name from subject string is set using 'auth_certificate_role_queries'.\n"
         "* com.scylladb.auth.TransitionalAuthenticator: Wraps around the PasswordAuthenticator, logging them in if username/password pair provided is correct and treating them as anonymous users otherwise.\n"
+        "* com.scylladb.auth.SaslauthdAuthenticator : Use saslauthd for authentication.\n"
         "\n"
         "Related information: Internal authentication", 
-        {"AllowAllAuthenticator", "PasswordAuthenticator", "CertificateAuthenticator", "org.apache.cassandra.auth.PasswordAuthenticator", "org.apache.cassandra.auth.AllowAllAuthenticator", "com.scylladb.auth.TransitionalAuthenticator", "com.scylladb.auth.CertificateAuthenticator"})
+        {"AllowAllAuthenticator", "PasswordAuthenticator", "CertificateAuthenticator", "org.apache.cassandra.auth.PasswordAuthenticator", "com.scylladb.auth.SaslauthdAuthenticator", "org.apache.cassandra.auth.AllowAllAuthenticator", "com.scylladb.auth.TransitionalAuthenticator", "com.scylladb.auth.CertificateAuthenticator"})
     , internode_authenticator(this, "internode_authenticator", value_status::Unused, "enabled",
         "Internode authentication backend. It implements org.apache.cassandra.auth.AllowAllInternodeAuthenticator to allows or disallow connections from peer nodes.")
     , authorizer(this, "authorizer", value_status::Used, "org.apache.cassandra.auth.AllowAllAuthorizer",
@@ -892,7 +1056,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , role_manager(this, "role_manager", value_status::Used, "org.apache.cassandra.auth.CassandraRoleManager",
         "The role-management backend, used to maintain grants and memberships between roles."
         "The available role-managers are:\n"
-        "* CassandraRoleManager: Stores role data in the system_auth keyspace.")
+        "* org.apache.cassandra.auth.CassandraRoleManager: Stores role data in the system_auth keyspace;\n"
+        "* com.scylladb.auth.LDAPRoleManager: Fetches role data from an LDAP server.")
     , permissions_validity_in_ms(this, "permissions_validity_in_ms", liveness::LiveUpdate, value_status::Used, 10000,
         "How long permissions in cache remain valid. Depending on the authorizer, such as CassandraAuthorizer, fetching permissions can be resource intensive. Permissions caching is disabled when this property is set to 0 or when AllowAllAuthorizer is used. The cached value is considered valid as long as both its value is not older than the permissions_validity_in_ms "
         "and the cached value has been read at least once during the permissions_validity_in_ms time frame. If any of these two conditions doesn't hold the cached value is going to be evicted from the cache.\n"
@@ -954,7 +1119,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , api_doc_dir(this, "api_doc_dir", value_status::Used, "api/api-doc/", "The API definition file directory.")
     , load_balance(this, "load_balance", value_status::Unused, "none", "CQL request load balancing: 'none' or round-robin.'")
     , consistent_rangemovement(this, "consistent_rangemovement", value_status::Used, true, "When set to true, range movements will be consistent. It means: 1) it will refuse to bootstrap a new node if other bootstrapping/leaving/moving nodes detected. 2) data will be streamed to a new node only from the node which is no longer responsible for the token range. Same as -Dcassandra.consistent.rangemovement in cassandra.")
-    , join_ring(this, "join_ring", value_status::Unused, true, "When set to true, a node will join the token ring. When set to false, a node will not join the token ring. User can use nodetool join to initiate ring joinging later. Same as -Dcassandra.join_ring in cassandra.")
+    , join_ring(this, "join_ring", value_status::Used, true, "When set to true, a node will join the token ring. When set to false, a node will not join the token ring. This option cannot be changed after a node joins the cluster. If set to false, it overwrites the num_tokens and initial_token options. Setting to false is supported only if the cluster uses the raft-managed topology.")
     , load_ring_state(this, "load_ring_state", value_status::Used, true, "When set to true, load tokens and host_ids previously saved. Same as -Dcassandra.load_ring_state in cassandra.")
     , replace_node_first_boot(this, "replace_node_first_boot", value_status::Used, "", "The Host ID of a dead node to replace. If the replacing node has already been bootstrapped successfully, this option will be ignored.")
     , replace_address(this, "replace_address", value_status::Used, "", "[[deprecated]] The listen_address or broadcast_address of the dead node to replace. Same as -Dcassandra.replace_address.")
@@ -964,6 +1129,18 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , enable_repair_based_node_ops(this, "enable_repair_based_node_ops", liveness::LiveUpdate, value_status::Used, true, "Set true to use enable repair based node operations instead of streaming based.")
     , allowed_repair_based_node_ops(this, "allowed_repair_based_node_ops", liveness::LiveUpdate, value_status::Used, "replace,removenode,rebuild,bootstrap,decommission", "A comma separated list of node operations which are allowed to enable repair based node operations. The operations can be bootstrap, replace, removenode, decommission and rebuild.")
     , enable_compacting_data_for_streaming_and_repair(this, "enable_compacting_data_for_streaming_and_repair", liveness::LiveUpdate, value_status::Used, true, "Enable the compacting reader, which compacts the data for streaming and repair (load'n'stream included) before sending it to, or synchronizing it with peers. Can reduce the amount of data to be processed by removing dead data, but adds CPU overhead.")
+    , enable_tombstone_gc_for_streaming_and_repair(this, "enable_tombstone_gc_for_streaming_and_repair", liveness::LiveUpdate, value_status::Used, false,
+            "If the compacting reader is enabled for streaming and repair (see enable_compacting_data_for_streaming_and_repair), allow it to garbage-collect tombstones."
+            " This can reduce the amount of data repair has to process.")
+    , repair_partition_count_estimation_ratio(this, "repair_partition_count_estimation_ratio", liveness::LiveUpdate, value_status::Used, 0.1,
+        "Specify the fraction of partitions written by repair out of the total partitions. The value is currently only used for bloom filter estimation. Value is between 0 and 1.")
+    , repair_hints_batchlog_flush_cache_time_in_ms(this, "repair_hints_batchlog_flush_cache_time_in_ms", liveness::LiveUpdate, value_status::Used, 60 * 1000, "The repair hints and batchlog flush request cache time. Setting 0 disables the flush cache. The cache reduces the number of hints and batchlog flushes during repair when tombstone_gc is set to repair mode. When the cache is on, a slightly smaller repair time will be used with the benefits of dropped hints and batchlog flushes.")
+    , repair_multishard_reader_buffer_hint_size(this, "repair_multishard_reader_buffer_hint_size", liveness::LiveUpdate, value_status::Used, 1 * 1024 * 1024,
+        "The buffer size to use for the buffer-hint feature of the multishard reader when running repair in mixed-shard clusters. This can help the performance of mixed-shard repair (including RBNO). Set to 0 to disable the hint feature altogether.")
+    , repair_multishard_reader_enable_read_ahead(this, "repair_multishard_reader_enable_read_ahead", liveness::LiveUpdate, value_status::Used, false,
+        "The multishard reader has a read-ahead feature to improve latencies of range-scans. This feature can be detrimental when the multishard reader is used under repair, as is the case in repair in mixed-shard clusters."
+        " This know allows disabling this read-ahead (default), this can help the performance of mixed-shard repair (including RBNO).")
+    , enable_small_table_optimization_for_rbno(this, "enable_small_table_optimization_for_rbno", liveness::LiveUpdate, value_status::Used, true, "Set true to enable small table optimization for repair based node operations")
     , ring_delay_ms(this, "ring_delay_ms", value_status::Used, 30 * 1000, "Time a node waits to hear from other nodes before joining the ring in milliseconds. Same as -Dcassandra.ring_delay_ms in cassandra.")
     , shadow_round_ms(this, "shadow_round_ms", value_status::Used, 300 * 1000, "The maximum gossip shadow round time. Can be used to reduce the gossip feature check time during node boot up.")
     , fd_max_interval_ms(this, "fd_max_interval_ms", value_status::Used, 2 * 1000, "The maximum failure_detector interval time in milliseconds. Interval larger than the maximum will be ignored. Larger cluster may need to increase the default.")
@@ -983,6 +1160,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , unspooled_dirty_soft_limit(this, "unspooled_dirty_soft_limit", value_status::Used, 0.6, "Soft limit of unspooled dirty memory expressed as a portion of the hard limit.")
     , sstable_summary_ratio(this, "sstable_summary_ratio", value_status::Used, 0.0005, "Enforces that 1 byte of summary is written for every N (2000 by default)"
         "bytes written to data file. Value must be between 0 and 1.")
+    , components_memory_reclaim_threshold(this, "components_memory_reclaim_threshold", liveness::LiveUpdate, value_status::Used, .2, "Ratio of available memory for all in-memory components of SSTables in a shard beyond which the memory will be reclaimed from components until it falls back under the threshold. Currently, this limit is only enforced for bloom filters.")
     , large_memory_allocation_warning_threshold(this, "large_memory_allocation_warning_threshold", value_status::Used, size_t(1) << 20, "Warn about memory allocations above this size; set to zero to disable.")
     , enable_deprecated_partitioners(this, "enable_deprecated_partitioners", value_status::Used, false, "Enable the byteordered and random partitioners. These partitioners are deprecated and will be removed in a future version.")
     , enable_keyspace_column_family_metrics(this, "enable_keyspace_column_family_metrics", value_status::Used, false, "Enable per keyspace and per column family metrics reporting.")
@@ -1022,6 +1200,16 @@ db::config::config(std::shared_ptr<db::extensions> exts)
             "Start serializing reads after their collective memory consumption goes above $normal_limit * $multiplier.")
     , reader_concurrency_semaphore_kill_limit_multiplier(this, "reader_concurrency_semaphore_kill_limit_multiplier", liveness::LiveUpdate, value_status::Used, 4,
             "Start killing reads after their collective memory consumption goes above $normal_limit * $multiplier.")
+    , reader_concurrency_semaphore_cpu_concurrency(this, "reader_concurrency_semaphore_cpu_concurrency", liveness::LiveUpdate, value_status::Used, 1,
+            "Admit new reads while there are less than this number of requests that need CPU.")
+    , view_update_reader_concurrency_semaphore_serialize_limit_multiplier(this, "view_update_reader_concurrency_semaphore_serialize_limit_multiplier", liveness::LiveUpdate, value_status::Used, 2,
+            "Start serializing view update reads after their collective memory consumption goes above $normal_limit * $multiplier.")
+    , view_update_reader_concurrency_semaphore_kill_limit_multiplier(this, "view_update_reader_concurrency_semaphore_kill_limit_multiplier", liveness::LiveUpdate, value_status::Used, 4,
+            "Start killing view update reads after their collective memory consumption goes above $normal_limit * $multiplier.")
+    , view_update_reader_concurrency_semaphore_cpu_concurrency(this, "view_update_reader_concurrency_semaphore_cpu_concurrency", liveness::LiveUpdate, value_status::Used, 1,
+            "Admit new view update reads while there are less than this number of requests that need CPU.")
+    , maintenance_reader_concurrency_semaphore_count_limit(this, "maintenance_reader_concurrency_semaphore_count_limit", liveness::LiveUpdate, value_status::Used, 10,
+            "Allow up to this many maintenance (e.g. streaming and repair) reads per shard to progress at the same time.")
     , twcs_max_window_count(this, "twcs_max_window_count", liveness::LiveUpdate, value_status::Used, 50,
             "The maximum number of compaction windows allowed when making use of TimeWindowCompactionStrategy. A setting of 0 effectively disables the restriction.")
     , initial_sstable_loading_concurrency(this, "initial_sstable_loading_concurrency", value_status::Used, 4u,
@@ -1055,14 +1243,12 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "To preserve backwards compatibility on old clusters, Scylla's default setting is `warn`. "
         "New clusters have this option set to `true` by scylla.yaml (which overrides the default `warn`), "
         "to make sure that trying to create an invalid view causes an error.")
-    , reversed_reads_auto_bypass_cache(this, "reversed_reads_auto_bypass_cache", liveness::LiveUpdate, value_status::Used, false,
-            "Bypass in-memory data cache (the row cache) when performing reversed queries.")
-    , enable_optimized_reversed_reads(this, "enable_optimized_reversed_reads", liveness::LiveUpdate, value_status::Used, true,
-            "Use a new optimized algorithm for performing reversed reads.")
     , enable_cql_config_updates(this, "enable_cql_config_updates", liveness::LiveUpdate, value_status::Used, true,
             "Make the system.config table UPDATEable.")
     , enable_parallelized_aggregation(this, "enable_parallelized_aggregation", liveness::LiveUpdate, value_status::Used, true,
             "Use on a new, parallel algorithm for performing aggregate queries.")
+    , cql_duplicate_bind_variable_names_refer_to_same_variable(this, "cql_duplicate_bind_variable_names_refer_to_same_variable", liveness::LiveUpdate, value_status::Used, true,
+            "A bind variable that appears twice in a CQL query refers to a single variable (if false, no name matching is performed).")
     , alternator_port(this, "alternator_port", value_status::Used, 0, "Alternator API port.")
     , alternator_https_port(this, "alternator_https_port", value_status::Used, 0, "Alternator API HTTPS port.")
     , alternator_address(this, "alternator_address", value_status::Used, "0.0.0.0", "Alternator API listening address.")
@@ -1109,7 +1295,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "Ignore truncation record stored in system tables as if tables were never truncated.")
     , force_schema_commit_log(this, "force_schema_commit_log", value_status::Deprecated, false,
         "Use separate schema commit log unconditionally rater than after restart following discovery of cluster-wide support for it.")
-    , task_ttl_seconds(this, "task_ttl_in_seconds", liveness::LiveUpdate, value_status::Used, 0, "Time for which information about finished task stays in memory.")
+    , task_ttl_seconds(this, "task_ttl_in_seconds", liveness::LiveUpdate, value_status::Used, 0, "Time for which information about finished task started internally stays in memory.")
+    , user_task_ttl_seconds(this, "user_task_ttl_in_seconds", liveness::LiveUpdate, value_status::Used, 3600, "Time for which information about finished task started by user stays in memory.")
     , nodeops_watchdog_timeout_seconds(this, "nodeops_watchdog_timeout_seconds", liveness::LiveUpdate, value_status::Used, 120, "Time in seconds after which node operations abort when not hearing from the coordinator.")
     , nodeops_heartbeat_interval_seconds(this, "nodeops_heartbeat_interval_seconds", liveness::LiveUpdate, value_status::Used, 10, "Period of heartbeat ticks in node operations.")
     , cache_index_pages(this, "cache_index_pages", liveness::LiveUpdate, value_status::Used, true,
@@ -1117,6 +1304,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , index_cache_fraction(this, "index_cache_fraction", liveness::LiveUpdate, value_status::Used, 0.2,
         "The maximum fraction of cache memory permitted for use by index cache. Clamped to the [0.0; 1.0] range. Must be small enough to not deprive the row cache of memory, but should be big enough to fit a large fraction of the index. The default value 0.2 means that at least 80\% of cache memory is reserved for the row cache, while at most 20\% is usable by the index cache.")
     , consistent_cluster_management(this, "consistent_cluster_management", value_status::Deprecated, true, "Use RAFT for cluster management and DDL.")
+    , force_gossip_topology_changes(this, "force_gossip_topology_changes", value_status::Used, false, "Force gossip-based topology operations in a fresh cluster. Only the first node in the cluster must use it. The rest will fall back to gossip-based operations anyway. This option should be used only for testing.  Note: gossip topology changes are incompatible with tablets.")
     , wasm_cache_memory_fraction(this, "wasm_cache_memory_fraction", value_status::Used, 0.01, "Maximum total size of all WASM instances stored in the cache as fraction of total shard memory.")
     , wasm_cache_timeout_in_ms(this, "wasm_cache_timeout_in_ms", value_status::Used, 5000, "Time after which an instance is evicted from the cache.")
     , wasm_cache_instance_size_limit(this, "wasm_cache_instance_size_limit", value_status::Used, 1024*1024, "Instances with size above this limit will not be stored in the cache.")
@@ -1145,14 +1333,44 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , replication_strategy_warn_list(this, "replication_strategy_warn_list", liveness::LiveUpdate, value_status::Used, {locator::replication_strategy_type::simple}, "Controls which replication strategies to warn about when creating/altering a keyspace. Doesn't affect the pre-existing keyspaces.")
     , replication_strategy_fail_list(this, "replication_strategy_fail_list", liveness::LiveUpdate, value_status::Used, {}, "Controls which replication strategies are disallowed to be used when creating/altering a keyspace. Doesn't affect the pre-existing keyspaces.")
     , service_levels_interval(this, "service_levels_interval_ms", liveness::LiveUpdate, value_status::Used, 10000, "Controls how often service levels module polls configuration table")
+
+    , audit(this, "audit", value_status::Used, "none",
+        "Controls the audit feature:\n"
+        "\n"
+        "\tnone   : No auditing enabled.\n"
+        "\tsyslog : Audit messages sent to Syslog.\n"
+        "\ttable  : Audit messages written to column family named audit.audit_log.\n")
+    , audit_categories(this, "audit_categories", value_status::Used, "DCL,DDL,AUTH", "Comma separated list of operation categories that should be audited.")
+    , audit_tables(this, "audit_tables", value_status::Used, "", "Comma separated list of table names (<keyspace>.<table>) that will be audited.")
+    , audit_keyspaces(this, "audit_keyspaces", value_status::Used, "", "Comma separated list of keyspaces that will be audited. All tables in those keyspaces will be audited")
+    , audit_unix_socket_path(this, "audit_unix_socket_path", value_status::Used, "/dev/log", "The path to the unix socket used for writting to syslog. Only applicable when audit is set to syslog.")
+    , audit_syslog_write_buffer_size(this, "audit_syslog_write_buffer_size", value_status::Used, 1048576, "The size (in bytes) of a write buffer used when writting to syslog socket.")
+    , ldap_url_template(this, "ldap_url_template", value_status::Used, "", "LDAP URL template used by LDAPRoleManager for crafting queries.")
+    , ldap_attr_role(this, "ldap_attr_role", value_status::Used, "", "LDAP attribute containing Scylla role.")
+    , ldap_bind_dn(this, "ldap_bind_dn", value_status::Used, "", "Distinguished name used by LDAPRoleManager for binding to LDAP server.")
+    , ldap_bind_passwd(this, "ldap_bind_passwd", value_status::Used, "", "Password used by LDAPRoleManager for binding to LDAP server.")
+    , saslauthd_socket_path(this, "saslauthd_socket_path", value_status::Used, "", "UNIX domain socket on which saslauthd is listening.")
+
     , error_injections_at_startup(this, "error_injections_at_startup", error_injection_value_status, {}, "List of error injections that should be enabled on startup.")
     , topology_barrier_stall_detector_threshold_seconds(this, "topology_barrier_stall_detector_threshold_seconds", value_status::Used, 2, "Report sites blocking topology barrier if it takes longer than this.")
-    , default_log_level(this, "default_log_level", value_status::Used)
-    , logger_log_level(this, "logger_log_level", value_status::Used)
-    , log_to_stdout(this, "log_to_stdout", value_status::Used)
-    , log_to_syslog(this, "log_to_syslog", value_status::Used)
+    , enable_tablets(this, "enable_tablets", value_status::Used, false, "Enable tablets for newly created keyspaces.")
+    , view_flow_control_delay_limit_in_ms(this, "view_flow_control_delay_limit_in_ms", liveness::LiveUpdate, value_status::Used, 1000,
+        "The maximal amount of time that materialized-view update flow control may delay responses "
+        "to try to slow down the client and prevent buildup of unfinished view updates. "
+        "To be effective, this maximal delay should be larger than the typical latencies. "
+        "Setting view_flow_control_delay_limit_in_ms to 0 disables view-update flow control.")
+    , disk_space_monitor_normal_polling_interval_in_seconds(this, "disk_space_monitor_normal_polling_interval_in_seconds", value_status::Used, 10, "Disk-space polling interval while below polling threshold")
+    , disk_space_monitor_high_polling_interval_in_seconds(this, "disk_space_monitor_high_polling_interval_in_seconds", value_status::Used, 1, "Disk-space polling interval at or above polling threshold")
+    , disk_space_monitor_polling_interval_threshold(this, "disk_space_monitor_polling_interval_threshold", value_status::Used, 0.9, "Disk-space polling threshold. Polling interval is increased when disk utilization is greater than or equal to this threshold")
+    , enable_create_table_with_compact_storage(this, "enable_create_table_with_compact_storage", liveness::LiveUpdate, value_status::Used, false, "Enable the deprecated feature of CREATE TABLE WITH COMPACT STORAGE.  This feature will eventually be removed in a future version.")
+    , default_log_level(this, "default_log_level", value_status::Used, seastar::log_level::info, "Default log level for log messages")
+    , logger_log_level(this, "logger_log_level", value_status::Used, {}, "Map of logger name to log level. Valid log levels are 'error', 'warn', 'info', 'debug' and 'trace'")
+    , log_to_stdout(this, "log_to_stdout", value_status::Used, true, "Send log output to stdout")
+    , log_to_syslog(this, "log_to_syslog", value_status::Used, false, "Send log output to syslog")
     , _extensions(std::move(exts))
-{}
+{
+    add_tombstone_gc_extension();
+}
 
 db::config::config()
     : config(std::make_shared<db::extensions>())
@@ -1171,6 +1389,10 @@ void db::config::add_per_partition_rate_limit_extension() {
 
 void db::config::add_tags_extension() {
     _extensions->add_schema_extension<db::tags_extension>(db::tags_extension::NAME);
+}
+
+void db::config::add_tombstone_gc_extension() {
+    _extensions->add_schema_extension<tombstone_gc_extension>(tombstone_gc_extension::NAME);
 }
 
 void db::config::setup_directories() {
@@ -1212,21 +1434,11 @@ struct fmt::formatter<db::seed_provider_type> {
 
 namespace db {
 
-std::ostream& operator<<(std::ostream& os, const db::seed_provider_type& s) {
-    os << "seed_provider_type{class=" << s.class_name << ", params=" << s.parameters << "}";
-    return os;
-}
-
 std::istream& operator>>(std::istream& is, db::seed_provider_type& s) {
     // FIXME -- this operator is used, in particular, by boost lexical_cast<>
     // it's here just to make the code compile, but it's not yet called for real
     throw std::runtime_error("reading seed_provider_type from istream is not implemented");
     return is;
-}
-
-std::ostream& operator<<(std::ostream& os, const error_injection_at_startup& eias) {
-    fmt::print(os, "{}", eias);
-    return os;
 }
 
 std::istream& operator>>(std::istream& is, error_injection_at_startup& eias) {
@@ -1239,8 +1451,8 @@ std::istream& operator>>(std::istream& is, error_injection_at_startup& eias) {
 
 auto fmt::formatter<db::error_injection_at_startup>::format(const db::error_injection_at_startup& eias, fmt::format_context& ctx) const
     -> decltype(ctx.out()) {
-    return fmt::format_to(ctx.out(), "error_injection_at_startup{{name={}, one_short={}}}",
-                          eias.name, eias.one_shot);
+    return fmt::format_to(ctx.out(), "error_injection_at_startup{{name={}, one_short={}, parameters={}}}",
+                          eias.name, eias.one_shot, eias.parameters);
 }
 
 namespace utils {
@@ -1333,10 +1545,11 @@ std::map<sstring, db::experimental_features_t::feature> db::experimental_feature
         {"cdc", feature::UNUSED},
         {"alternator-streams", feature::ALTERNATOR_STREAMS},
         {"alternator-ttl", feature::UNUSED },
-        {"consistent-topology-changes", feature::CONSISTENT_TOPOLOGY_CHANGES},
+        {"consistent-topology-changes", feature::UNUSED},
         {"broadcast-tables", feature::BROADCAST_TABLES},
         {"keyspace-storage-options", feature::KEYSPACE_STORAGE_OPTIONS},
-        {"tablets", feature::TABLETS},
+        {"tablets", feature::UNUSED},
+        {"views-with-tablets", feature::VIEWS_WITH_TABLETS}
     };
 }
 
@@ -1426,12 +1639,7 @@ future<gms::inet_address> resolve(const config_file::named_value<sstring>& addre
     co_return coroutine::exception(std::move(ex));
 }
 
-static future<std::vector<seastar::metrics::relabel_config>> get_relable_from_file(const std::string& name) {
-    file f = co_await seastar::open_file_dma(name, open_flags::ro);
-    size_t s = co_await f.size();
-    seastar::input_stream<char> in = seastar::make_file_input_stream(f);
-    temporary_buffer<char> buf = co_await in.read_exactly(s);
-    auto yaml = YAML::Load(sstring(buf.begin(), buf.end()));
+static std::vector<seastar::metrics::relabel_config> get_relable_from_yaml(const YAML::Node& yaml, const std::string& name) {
     std::vector<seastar::metrics::relabel_config> relabels;
     const YAML::Node& relabel_configs = yaml["relabel_configs"];
     relabels.resize(relabel_configs.size());
@@ -1464,17 +1672,51 @@ static future<std::vector<seastar::metrics::relabel_config>> get_relable_from_fi
             }
         }
     }
-    co_return relabels;
+    return relabels;
+}
+
+static std::vector<seastar::metrics::metric_family_config> get_metric_configs_from_yaml(const YAML::Node& yaml, const std::string& name) {
+    std::vector<seastar::metrics::metric_family_config> metric_config;
+    const YAML::Node& metric_family_configs = yaml["metric_family_configs"];
+    metric_config.resize(metric_family_configs.size());
+    size_t i = 0;
+    for (auto it = metric_family_configs.begin(); it != metric_family_configs.end(); ++it, i++) {
+        const YAML::Node& element = *it;
+        for(YAML::const_iterator e_it = element.begin(); e_it != element.end(); ++e_it) {
+            std::string key = e_it->first.as<std::string>();
+            if (key == "aggregate_labels") {
+                auto labels = e_it->second;
+                std::vector<std::string> aggregate_labels;
+                aggregate_labels.resize(labels.size());
+                size_t j = 0;
+                for (auto label_it = labels.begin(); label_it !=  labels.end(); ++label_it, j++) {
+                    aggregate_labels[j] = label_it->as<std::string>();
+                }
+                metric_config[i].aggregate_labels = aggregate_labels;
+            } else if (key == "name") {
+                metric_config[i].name = e_it->second.as<std::string>();
+            } else if (key == "regex") {
+                metric_config[i].regex_name = e_it->second.as<std::string>();
+            }
+        }
+    }
+    return metric_config;
 }
 
 future<> update_relabel_config_from_file(const std::string& name) {
     if (name.empty()) {
         co_return;
     }
-
-    std::vector<seastar::metrics::relabel_config> relabels = co_await  get_relable_from_file(name);
+    file f = co_await seastar::open_file_dma(name, open_flags::ro);
+    size_t s = co_await f.size();
+    seastar::input_stream<char> in = seastar::make_file_input_stream(f);
+    temporary_buffer<char> buf = co_await in.read_exactly(s);
+    auto yaml = YAML::Load(sstring(buf.begin(), buf.end()));
+    std::vector<seastar::metrics::relabel_config> relabels = get_relable_from_yaml(yaml, name);
+    std::vector<seastar::metrics::metric_family_config> metric_configs = get_metric_configs_from_yaml(yaml, name);
     bool failed = false;
-    co_await smp::invoke_on_all([&relabels, &failed] {
+    co_await smp::invoke_on_all([&relabels, &failed, &metric_configs] {
+        metrics::set_metric_family_configs(metric_configs);
         return metrics::set_relabel_configs(relabels).then([&failed](const metrics::metric_relabeling_result& result) {
             if (result.metrics_relabeled_due_to_collision > 0) {
                 failed = true;
@@ -1488,18 +1730,19 @@ future<> update_relabel_config_from_file(const std::string& name) {
     co_return;
 }
 
-std::vector<sstring> split_comma_separated_list(sstring comma_separated_list) {
+std::vector<sstring> split_comma_separated_list(const std::string_view comma_separated_list) {
     std::vector<sstring> strs, trimmed_strs;
-    boost::split(strs, std::move(comma_separated_list), boost::is_any_of(","));
-    for (sstring n : strs) {
+    boost::split(strs, comma_separated_list, boost::is_any_of(","));
+    trimmed_strs.reserve(strs.size());
+    for (sstring& n : strs) {
         std::replace(n.begin(), n.end(), '\"', ' ');
         std::replace(n.begin(), n.end(), '\'', ' ');
         boost::trim_all(n);
         if (!n.empty()) {
-            trimmed_strs.push_back(n);
+            trimmed_strs.push_back(std::move(n));
         }
     }
     return trimmed_strs;
 }
 
-}
+} // namespace utils

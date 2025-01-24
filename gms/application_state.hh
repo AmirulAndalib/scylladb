@@ -5,12 +5,11 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
 
-#include <iosfwd>
 #include <fmt/core.h>
 
 namespace gms {
@@ -39,11 +38,10 @@ enum class application_state {
     IGNORE_MSB_BITS,
     CDC_GENERATION_ID,
     SNITCH_NAME,
+    GROUP0_STATE_ID,
 };
 
-std::ostream& operator<<(std::ostream& os, const application_state& m);
-
-}
+} // namespace gms
 
 template <>
 struct fmt::formatter<gms::application_state> {

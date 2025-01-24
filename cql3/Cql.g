@@ -68,6 +68,7 @@ options {
 #include "cql3/statements/ks_prop_defs.hh"
 #include "cql3/selection/raw_selector.hh"
 #include "cql3/selection/selectable-expr.hh"
+#include "cql3/dialect.hh"
 #include "cql3/keyspace_element_name.hh"
 #include "cql3/constants.hh"
 #include "cql3/operation_impl.hh"
@@ -148,6 +149,8 @@ using uexpression = uninitialized<expression>;
 
     listener_type* listener;
 
+    dialect _dialect;
+
     // Keeps the names of all bind variables. For bind variables without a name ('?'), the name is nullptr.
     // Maps bind_index -> name.
     std::vector<::shared_ptr<cql3::column_identifier>> _bind_variable_names;
@@ -171,9 +174,14 @@ using uexpression = uninitialized<expression>;
         return s;
     }
 
+    void set_dialect(dialect d) {
+        _dialect = d;
+    }
+
     bind_variable new_bind_variables(shared_ptr<cql3::column_identifier> name)
     {
-        if (name && _named_bind_variables_indexes.contains(*name)) {
+        if (_dialect.duplicate_bind_variable_names_refer_to_same_variable
+                && name && _named_bind_variables_indexes.contains(*name)) {
             return bind_variable{_named_bind_variables_indexes[*name]};
         }
         auto marker = bind_variable{_bind_variable_names.size()};
@@ -422,7 +430,7 @@ selectStatement returns [std::unique_ptr<raw::select_statement> expr]
       ( K_LIMIT rows=intValue { limit = std::move(rows); } )?
       ( K_ALLOW K_FILTERING  { allow_filtering = true; } )?
       ( K_BYPASS K_CACHE { bypass_cache = true; })?
-      ( usingTimeoutClause[attrs] )?
+      ( usingTimeoutServiceLevelClause[attrs] )?
       {
           auto params = make_lw_shared<raw::select_statement::parameters>(std::move(orderings), is_distinct, allow_filtering, statement_subtype, bypass_cache);
           $expr = std::make_unique<raw::select_statement>(std::move(cf), std::move(params),
@@ -441,8 +449,7 @@ selector returns [shared_ptr<raw_selector> s]
     : us=unaliasedSelector (K_AS c=ident { alias = c; })? { $s = ::make_shared<raw_selector>(std::move(us), alias); }
     ;
 
-unaliasedSelector returns [uexpression s]
-    @init { uexpression tmp; }
+unaliasedSelector returns [uexpression tmp]
     :  ( c=cident                                  { tmp = unresolved_identifier{std::move(c)}; }
        | K_COUNT '(' countArgument ')'             { tmp = make_count_rows_function_expression(); }
        | K_WRITETIME '(' c=cident ')'              { tmp = column_mutation_attribute{column_mutation_attribute::attribute_kind::writetime,
@@ -452,8 +459,9 @@ unaliasedSelector returns [uexpression s]
        | f=functionName args=selectionFunctionArgs { tmp = function_call{std::move(f), std::move(args)}; }
        | K_CAST      '(' arg=unaliasedSelector K_AS t=native_type ')'  { tmp = cast{.style = cast::cast_style::sql, .arg = std::move(arg), .type = std::move(t)}; }
        )
-       ( '.' fi=cident { tmp = field_selection{std::move(tmp), std::move(fi)}; } )*
-    { $s = tmp; }
+       ( '.' fi=cident { tmp = field_selection{std::move(tmp), std::move(fi)}; }
+       | '[' sub=term ']' { tmp = subscript{std::move(tmp), std::move(sub)}; }
+       )*
     ;
 
 selectionFunctionArgs returns [std::vector<expression> a]
@@ -552,6 +560,19 @@ usingTimestampTimeoutClauseObjective[std::unique_ptr<cql3::attributes::raw>& att
 
 usingTimeoutClause[std::unique_ptr<cql3::attributes::raw>& attrs]
     : K_USING K_TIMEOUT to=term { attrs->timeout = std::move(to); }
+    ;
+
+usingTimestampClause[std::unique_ptr<cql3::attributes::raw>& attrs]
+    : K_USING K_TIMESTAMP ts=intValue { attrs->timestamp = std::move(ts); }
+    ;
+
+usingTimeoutServiceLevelClause[std::unique_ptr<cql3::attributes::raw>& attrs]
+    : K_USING usingTimeoutServiceLevelClauseObjective[attrs] ( K_AND usingTimeoutServiceLevelClauseObjective[attrs] )*
+    ;
+
+usingTimeoutServiceLevelClauseObjective[std::unique_ptr<cql3::attributes::raw>& attrs]
+    : K_TIMEOUT to=term { attrs->timeout = std::move(to); }
+    | serviceLevel sl_name=serviceLevelOrRoleName { attrs->service_level = std::move(sl_name); }
     ;
 
 /**
@@ -984,16 +1005,17 @@ alterKeyspaceStatement returns [std::unique_ptr<cql3::statements::alter_keyspace
 /**
  * ALTER COLUMN FAMILY <CF> ALTER <column> TYPE <newtype>;
  * ALTER COLUMN FAMILY <CF> ADD <column> <newtype>; | ALTER COLUMN FAMILY <CF> ADD (<column> <newtype>,<column1> <newtype1>..... <column n> <newtype n>)
- * ALTER COLUMN FAMILY <CF> DROP <column>; | ALTER COLUMN FAMILY <CF> DROP ( <column>,<column1>.....<column n>)
+ * ALTER COLUMN FAMILY <CF> DROP <column> [USING TIMESTAMP <ts>]; | ALTER COLUMN FAMILY <CF> DROP ( <column>,<column1>.....<column n>) [USING TIMESTAMP <ts>]
  * ALTER COLUMN FAMILY <CF> WITH <property> = <value>;
  * ALTER COLUMN FAMILY <CF> RENAME <column> TO <column>;
  */
-alterTableStatement returns [std::unique_ptr<alter_table_statement> expr]
+alterTableStatement returns [std::unique_ptr<alter_table_statement::raw_statement> expr]
     @init {
         alter_table_statement::type type;
         auto props = cql3::statements::cf_prop_defs();
         std::vector<alter_table_statement::column_change> column_changes;
         std::vector<std::pair<shared_ptr<cql3::column_identifier::raw>, shared_ptr<cql3::column_identifier::raw>>> renames;
+        auto attrs = std::make_unique<cql3::attributes::raw>();
     }
     : K_ALTER K_COLUMNFAMILY cf=columnFamilyName
           ( K_ALTER id=cident K_TYPE v=comparatorType { type = alter_table_statement::type::alter; column_changes.emplace_back(alter_table_statement::column_change{id, v}); }
@@ -1007,13 +1029,14 @@ alterTableStatement returns [std::unique_ptr<alter_table_statement> expr]
             | '('     id1=cident { column_changes.emplace_back(alter_table_statement::column_change{id1}); }
                  (',' idn=cident { column_changes.emplace_back(alter_table_statement::column_change{idn}); } )* ')'
             )
+            ( usingTimestampClause[attrs] )?
           | K_WITH  properties[props]                 { type = alter_table_statement::type::opts; }
           | K_RENAME                                  { type = alter_table_statement::type::rename; }
                id1=cident K_TO toId1=cident { renames.emplace_back(id1, toId1); }
                ( K_AND idn=cident K_TO toIdn=cident { renames.emplace_back(idn, toIdn); } )*
           )
     {
-        $expr = std::make_unique<alter_table_statement>(std::move(cf), type, std::move(column_changes), std::move(props), std::move(renames));
+        $expr = std::make_unique<alter_table_statement::raw_statement>(std::move(cf), type, std::move(column_changes), std::move(props), std::move(renames), std::move(attrs));
     }
     ;
 
@@ -1317,6 +1340,7 @@ roleOptions[cql3::role_options& opts]
 
 roleOption[cql3::role_options& opts]
     : K_PASSWORD '=' v=STRING_LITERAL { opts.password = $v.text; }
+    | K_HASHED K_PASSWORD '=' v=STRING_LITERAL { opts.hashed_password = $v.text; }
     | K_OPTIONS '=' m=mapLiteral { opts.options = convert_property_map(m); }
     | K_SUPERUSER '=' b=BOOLEAN { opts.is_superuser = convert_boolean_literal($b.text); }
     | K_LOGIN '=' b=BOOLEAN { opts.can_login = convert_boolean_literal($b.text); }
@@ -1446,6 +1470,7 @@ describeStatement returns [std::unique_ptr<cql3::statements::raw::describe_state
         bool only = false;
         std::optional<sstring> keyspace;
         sstring generic_name = "";
+        bool with_hashed_passwords = false;
     }
     : ( K_DESCRIBE | K_DESC )
     ( (K_CLUSTER) => K_CLUSTER                      { $stmt = cql3::statements::raw::describe_statement::cluster();                }
@@ -1472,7 +1497,8 @@ describeStatement returns [std::unique_ptr<cql3::statements::raw::describe_state
         | tK=unreserved_keyword                     { generic_name = tK; } )
                                                     { $stmt = cql3::statements::raw::describe_statement::generic(keyspace, generic_name); }
     )
-    ( K_WITH K_INTERNALS { $stmt->with_internals_details(); } )?
+    ( K_WITH K_INTERNALS (K_AND K_PASSWORDS { with_hashed_passwords = true; })?
+        { $stmt->with_internals_details(with_hashed_passwords); } )?
     ;
 
 /** DEFINITIONS **/
@@ -1759,6 +1785,13 @@ columnCondition returns [uexpression e]
                             oper_t::IN,
                             std::move(values));
                 }
+        | K_NOT K_IN
+            values=singleColumnInValuesOrMarkerExpr {
+                    e = binary_operator(
+                            std::move(key),
+                            oper_t::NOT_IN,
+                            std::move(values));
+                }
         )
     ;
 
@@ -1809,6 +1842,14 @@ relation returns [uexpression e]
         { $e = binary_operator(unresolved_identifier{std::move(name)}, oper_t::IN, std::move(marker1)); }
     | name=cident K_IN in_values=singleColumnInValues
         { $e = binary_operator(unresolved_identifier{std::move(name)}, oper_t::IN,
+        collection_constructor {
+            .style = collection_constructor::style_type::list,
+            .elements = std::move(in_values)
+        }); }
+    | name=cident K_NOT K_IN marker1=marker
+        { $e = binary_operator(unresolved_identifier{std::move(name)}, oper_t::NOT_IN, std::move(marker1)); }
+    | name=cident K_NOT K_IN in_values=singleColumnInValues
+        { $e = binary_operator(unresolved_identifier{std::move(name)}, oper_t::NOT_IN,
         collection_constructor {
             .style = collection_constructor::style_type::list,
             .elements = std::move(in_values)
@@ -2048,6 +2089,8 @@ basic_unreserved_keyword returns [sstring str]
         | K_NOLOGIN
         | K_OPTIONS
         | K_PASSWORD
+        | K_PASSWORDS
+        | K_HASHED
         | K_EXISTS
         | K_CUSTOM
         | K_TRIGGER
@@ -2082,6 +2125,7 @@ basic_unreserved_keyword returns [sstring str]
         | K_SERVICE_LEVELS
         | K_ATTACHED
         | K_FOR
+        | K_SHARES
         | K_GROUP
         | K_TIMEOUT
         | K_SERVICE
@@ -2208,6 +2252,8 @@ K_ROLES:       R O L E S;
 K_SUPERUSER:   S U P E R U S E R;
 K_NOSUPERUSER: N O S U P E R U S E R;
 K_PASSWORD:    P A S S W O R D;
+K_PASSWORDS:   P A S S W O R D S;
+K_HASHED:      H A S H E D;
 K_LOGIN:       L O G I N;
 K_NOLOGIN:     N O L O G I N;
 K_OPTIONS:     O P T I O N S;
@@ -2288,6 +2334,7 @@ K_SERVICE: S E R V I C E;
 K_LEVEL: L E V E L;
 K_LEVELS: L E V E L S;
 K_EFFECTIVE: E F F E C T I V E;
+K_SHARES: S H A R E S;
 
 K_SCYLLA_TIMEUUID_LIST_INDEX: S C Y L L A '_' T I M E U U I D '_' L I S T '_' I N D E X;
 K_SCYLLA_COUNTER_SHARD_LIST: S C Y L L A '_' C O U N T E R '_' S H A R D '_' L I S T; 

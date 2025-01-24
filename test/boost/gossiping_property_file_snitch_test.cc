@@ -3,12 +3,14 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 
 #include <boost/test/unit_test.hpp>
+#include <fmt/ranges.h>
 #include "test/lib/scylla_test_case.hh"
+#include "test/lib/test_utils.hh"
 #include <seastar/util/std-compat.hh>
 #include <seastar/core/reactor.hh>
 #include <string>

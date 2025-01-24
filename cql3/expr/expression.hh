@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -221,7 +221,7 @@ const column_value& get_subscripted_column(const subscript&);
 /// Only columns can be subscripted in CQL, so we can expect that the subscripted expression is a column_value.
 const column_value& get_subscripted_column(const expression&);
 
-enum class oper_t { EQ, NEQ, LT, LTE, GTE, GT, IN, CONTAINS, CONTAINS_KEY, IS_NOT, LIKE };
+enum class oper_t { EQ, NEQ, LT, LTE, GTE, GT, IN, NOT_IN, CONTAINS, CONTAINS_KEY, IS_NOT, LIKE };
 
 /// Describes the nature of clustering-key comparisons.  Useful for implementing SCYLLA_CLUSTERING_BOUND.
 enum class comparison_order : char {
@@ -504,13 +504,9 @@ E* as_if(expression* e) {
 /// directly into the resulting conjunction's children, flattening the expression tree.
 extern expression make_conjunction(expression a, expression b);
 
-extern std::ostream& operator<<(std::ostream&, oper_t);
-
 extern sstring to_string(const expression&);
 
 extern std::ostream& operator<<(std::ostream&, const column_value&);
-
-extern std::ostream& operator<<(std::ostream&, const expression&);
 
 data_type type_of(const expression& e);
 
@@ -574,7 +570,7 @@ struct fmt::formatter<E> : public fmt::formatter<cql3::expr::expression> {
 };
 
 template <>
-struct fmt::formatter<cql3::expr::column_mutation_attribute::attribute_kind> : fmt::formatter<std::string_view> {
+struct fmt::formatter<cql3::expr::column_mutation_attribute::attribute_kind> : fmt::formatter<string_view> {
     template <typename FormatContext>
     auto format(cql3::expr::column_mutation_attribute::attribute_kind k, FormatContext& ctx) const {
         switch (k) {
