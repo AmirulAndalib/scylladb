@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "wasm.hh"
@@ -24,26 +24,6 @@ logging::logger wasm_logger("wasm");
 
 namespace wasm {
 
-startup_context::startup_context(db::config& cfg, replica::database_config& dbcfg)
-    : alien_runner(std::make_shared<wasm::alien_thread_runner>())
-    , engine(std::make_shared<rust::Box<wasmtime::Engine>>(wasmtime::create_engine(cfg.wasm_udf_memory_limit())))
-    , cache_size(dbcfg.available_memory * cfg.wasm_cache_memory_fraction())
-    , instance_size(cfg.wasm_cache_instance_size_limit())
-    , timer_period(std::chrono::milliseconds(cfg.wasm_cache_timeout_in_ms())) {
-}
-
-manager::manager(const std::optional<wasm::startup_context>& ctx)
-        : _engine(ctx ? ctx->engine : nullptr)
-        , _instance_cache(ctx ? std::make_optional<wasm::instance_cache>(ctx->cache_size, ctx->instance_size, ctx->timer_period) : std::nullopt)
-        , _alien_runner(ctx ? ctx->alien_runner : nullptr)
-{}
-
-future<> manager::stop() {
-    if (_instance_cache) {
-        co_await _instance_cache->stop();
-    }
-}
-
 context::context(wasmtime::Engine& engine_ptr, std::string name, instance_cache& cache, uint64_t yield_fuel, uint64_t total_fuel)
     : engine_ptr(engine_ptr)
     , function_name(name)
@@ -51,10 +31,6 @@ context::context(wasmtime::Engine& engine_ptr, std::string name, instance_cache&
     , yield_fuel(yield_fuel)
     , total_fuel(total_fuel) {
 }
-
-context::context(manager& manager, std::string name, uint64_t yield_fuel, uint64_t total_fuel)
-    : context(**manager._engine, std::move(name), *manager._instance_cache, yield_fuel, total_fuel)
-{ }
 
 static constexpr size_t WASM_PAGE_SIZE = 64 * 1024;
 
@@ -235,14 +211,10 @@ struct from_val_visitor {
             "externref",
         };
         if (val.kind() != expected) {
-            throw wasm::exception(format("Incorrect wasm value kind returned. Expected {}, got {}", kind_str[size_t(expected)], kind_str[size_t(val.kind())]));
+            throw wasm::exception(seastar::format("Incorrect wasm value kind returned. Expected {}, got {}", kind_str[size_t(expected)], kind_str[size_t(val.kind())]));
         }
     }
 };
-
-seastar::future<> manager::precompile(context& ctx, const std::vector<sstring>& arg_names, std::string script) {
-    return ::wasm::precompile(*_alien_runner, ctx, arg_names, std::move(script));
-}
 
 seastar::future<> precompile(alien_thread_runner& alien_runner, context& ctx, const std::vector<sstring>& arg_names, std::string script) {
     seastar::promise<rust::Box<wasmtime::Module>> done;
@@ -281,7 +253,7 @@ seastar::future<bytes_opt> run_script(context& ctx, wasmtime::Store& store, wasm
         } else if (param) {
             visit(type, init_arg_visitor{param, *argv, store, instance});
         } else {
-            co_await coroutine::return_exception(wasm::exception(format("Function {} cannot be called on null values", ctx.function_name)));
+            co_await coroutine::return_exception(wasm::exception(seastar::format("Function {} cannot be called on null values", ctx.function_name)));
         }
     }
     auto rets = wasmtime::get_val_vec();

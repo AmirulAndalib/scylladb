@@ -3,18 +3,18 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "test/lib/test_utils.hh"
 
 #include <seastar/util/file.hh>
 #include <boost/range/adaptor/map.hpp>
-#include <boost/range/algorithm/sort.hpp>
-#include <seastar/core/print.hh>
+#include <seastar/core/format.hh>
 #include <seastar/util/backtrace.hh>
 #include "test/lib/log.hh"
 #include "test/lib/simple_schema.hh"
+#include "utils/to_string.hh"
 #include "seastarx.hh"
 #include <random>
 
@@ -101,22 +101,3 @@ future<> touch_file(std::string name) {
 std::mutex boost_logger_mutex;
 
 }
-
-namespace std {
-
-std::ostream& boost_test_print_type(std::ostream& os, const std::strong_ordering& order) {
-    fmt::print(os, "{}", order);
-    return os;
-}
-
-std::ostream& boost_test_print_type(std::ostream& os, const std::weak_ordering& order) {
-    fmt::print(os, "{}", order);
-    return os;
-}
-
-std::ostream& boost_test_print_type(std::ostream& os, const std::partial_ordering& order) {
-    fmt::print(os, "{}", order);
-    return os;
-}
-
-} // namespace std

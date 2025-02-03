@@ -1,20 +1,21 @@
 # -*- coding: utf-8 -*-
 # Copyright 2019-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 
 # Tests for Tagging:
 # 1. TagResource - tagging a table with a (key, value) pair
 # 2. UntagResource
 # 3. ListTagsOfResource
 
+import threading
+
 import pytest
 from botocore.exceptions import ClientError
-import re
-import time
-import threading
-from util import multiset, create_test_table, unique_table_name, random_string
 from packaging.version import Version
+
+from test.alternator.util import multiset, create_test_table, unique_table_name, random_string
+
 
 def delete_tags(table, arn):
     got = table.meta.client.list_tags_of_resource(ResourceArn=arn)

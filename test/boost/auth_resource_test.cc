@@ -3,34 +3,16 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #define BOOST_TEST_MODULE core
 
 #include "auth/resource.hh"
+#include "test/lib/test_utils.hh"
 
 #include <boost/test/unit_test.hpp>
 #include <fmt/ranges.h>
-
-namespace auth {
-
-std::ostream& boost_test_print_type(std::ostream& os, const resource& r) {
-    fmt::print(os, "{}", r);
-    return os;
-}
-
-std::ostream& boost_test_print_type(std::ostream& os, const resource_kind& kind) {
-    fmt::print(os, "{}", kind);
-    return os;
-}
-
-std::ostream& boost_test_print_type(std::ostream& os, const resource_set& resources) {
-    fmt::print(os, "{}", resources);
-    return os;
-}
-
-}
 
 BOOST_AUTO_TEST_CASE(root_of) {
     //

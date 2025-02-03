@@ -3,23 +3,24 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "i_partitioner.hh"
 #include "sharder.hh"
+#include "auto_refreshing_sharder.hh"
+#include <seastar/core/loop.hh>
 #include <seastar/core/seastar.hh>
 #include <seastar/coroutine/maybe_yield.hh>
 #include "dht/ring_position.hh"
 #include "dht/token-sharding.hh"
+#include "utils/assert.hh"
 #include "utils/class_registrator.hh"
-#include <boost/range/adaptor/map.hpp>
-#include <boost/range/irange.hpp>
-#include <boost/range/adaptor/transformed.hpp>
 #include "sstables/key.hh"
+#include "replica/database.hh"
 #include <seastar/core/thread.hh>
 #include <seastar/core/on_internal_error.hh>
-#include "log.hh"
+#include "utils/log.hh"
 
 namespace dht {
 
@@ -30,45 +31,65 @@ sharder::sharder(unsigned shard_count, unsigned sharding_ignore_msb_bits)
     // if one shard, ignore sharding_ignore_msb_bits as they will just cause needless
     // range breaks
     , _sharding_ignore_msb_bits(shard_count > 1 ? sharding_ignore_msb_bits : 0)
+{}
+
+static_sharder::static_sharder(unsigned shard_count, unsigned sharding_ignore_msb_bits)
+    : sharder(shard_count, sharding_ignore_msb_bits)
     , _shard_start(init_zero_based_shard_start(_shard_count, _sharding_ignore_msb_bits))
 {}
 
 unsigned
-sharder::shard_of(const token& t) const {
+static_sharder::shard_of(const token& t) const {
     return dht::shard_of(_shard_count, _sharding_ignore_msb_bits, t);
 }
 
+unsigned
+static_sharder::shard_for_reads(const token& t) const {
+    return shard_of(t);
+}
+
+shard_replica_set
+static_sharder::shard_for_writes(const token& t, std::optional<write_replica_set_selector> sel) const {
+    return {shard_of(t)};
+}
+
 token
-sharder::token_for_next_shard(const token& t, shard_id shard, unsigned spans) const {
+static_sharder::token_for_next_shard(const token& t, shard_id shard, unsigned spans) const {
     return dht::token_for_next_shard(_shard_start, _shard_count, _sharding_ignore_msb_bits, t, shard, spans);
 }
 
+token
+static_sharder::token_for_next_shard_for_reads(const token& t, shard_id shard, unsigned spans) const {
+    return token_for_next_shard(t, shard, spans);
+}
+
 std::optional<shard_and_token>
-sharder::next_shard(const token& t) const {
-    auto shard = shard_of(t);
+static_sharder::next_shard(const token& t) const {
+    auto shard = shard_for_reads(t);
     auto next_shard = shard + 1 == _shard_count ? 0 : shard + 1;
-    auto next_token = token_for_next_shard(t, next_shard);
-    if (next_token == dht::maximum_token()) {
+    auto next_token = token_for_next_shard_for_reads(t, next_shard);
+    if (next_token.is_maximum()) {
         return std::nullopt;
     }
     return shard_and_token{next_shard, next_token};
 }
 
-std::ostream& operator<<(std::ostream& out, const decorated_key& dk) {
-    fmt::print(out, "{}", dk);
-    return out;
+std::optional<shard_and_token>
+static_sharder::next_shard_for_reads(const token& t) const {
+    return next_shard(t);
 }
 
 std::unique_ptr<dht::i_partitioner> make_partitioner(sstring partitioner_name) {
     try {
         return create_object<i_partitioner>(partitioner_name);
     } catch (std::exception& e) {
-        auto supported_partitioners = fmt::join(
-            class_registry<i_partitioner>::classes() |
-            boost::adaptors::map_keys,
-            ", ");
-        throw std::runtime_error(format("Partitioner {} is not supported, supported partitioners = {{ {} }} : {}",
-                partitioner_name, supported_partitioners, e.what()));
+        throw std::runtime_error(fmt::format("Partitioner {} is not supported, supported partitioners = {{ {} }} : {}",
+                partitioner_name,
+                fmt::join(
+                    class_registry<i_partitioner>::classes() |
+                    std::views::keys,
+                    ", "),
+                e.what()));
     }
 }
 
@@ -131,7 +152,7 @@ decorated_key::less_comparator::operator()(const decorated_key& lhs, const ring_
 }
 
 unsigned static_shard_of(const schema& s, const token& t) {
-    return s.get_sharder().shard_of(t);
+    return s.get_sharder().shard_for_reads(t);
 }
 
 std::optional<dht::token_range>
@@ -141,10 +162,10 @@ selective_token_range_sharder::next() {
     }
     while (_range.overlaps(dht::token_range(_start_boundary, {}), dht::token_comparator())
             && !(_start_boundary && _start_boundary->value() == maximum_token())) {
-        auto end_token = _sharder.token_for_next_shard(_start_token, _next_shard);
+        auto end_token = _sharder.token_for_next_shard_for_reads(_start_token, _next_shard);
         auto candidate = dht::token_range(std::move(_start_boundary), interval_bound<dht::token>(end_token, false));
         auto intersection = _range.intersection(std::move(candidate), dht::token_comparator());
-        _start_token = _sharder.token_for_next_shard(end_token, _shard);
+        _start_token = _sharder.token_for_next_shard_for_reads(end_token, _shard);
         _start_boundary = interval_bound<dht::token>(_start_token);
         if (intersection) {
             return *intersection;
@@ -161,8 +182,8 @@ ring_position_range_sharder::next(const schema& s) {
         return {};
     }
     auto token = _range.start() ? _range.start()->value().token() : dht::minimum_token();
-    auto shard = _sharder.shard_of(token);
-    auto next_shard_and_token = _sharder.next_shard(token);
+    auto shard = _sharder.shard_for_reads(token);
+    auto next_shard_and_token = _sharder.next_shard_for_reads(token);
     if (!next_shard_and_token) {
         _done = true;
         return ring_position_range_and_shard{std::move(_range), shard};
@@ -170,7 +191,7 @@ ring_position_range_sharder::next(const schema& s) {
     auto shard_boundary_token = next_shard_and_token->token;
     auto shard_boundary = ring_position::starting_at(shard_boundary_token);
     if ((!_range.end() || shard_boundary.less_compare(s, _range.end()->value()))
-            && shard_boundary_token != maximum_token()) {
+            && !shard_boundary_token.is_maximum()) {
         // split the range at end_of_shard
         auto start = _range.start();
         auto end = interval_bound<ring_position>(shard_boundary, false);
@@ -208,7 +229,7 @@ ring_position_range_vector_sharder::next(const schema& s) {
 }
 
 future<utils::chunked_vector<partition_range>>
-split_range_to_single_shard(const schema& s, const sharder& sharder, const partition_range& pr, shard_id shard) {
+split_range_to_single_shard(const schema& s, const static_sharder& sharder, const partition_range& pr, shard_id shard) {
     auto start_token = pr.start() ? pr.start()->value().token() : minimum_token();
     auto start_shard = sharder.shard_of(start_token);
     auto start_boundary = start_shard == shard ? pr.start() : interval_bound<ring_position>(ring_position::starting_at(sharder.token_for_next_shard(start_token, shard)));
@@ -221,7 +242,7 @@ split_range_to_single_shard(const schema& s, const sharder& sharder, const parti
             start_boundary,
             shard] () mutable {
         if (pr.overlaps(partition_range(start_boundary, {}), cmp)
-                && !(start_boundary && start_boundary->value().token() == maximum_token())) {
+                && !(start_boundary && start_boundary->value().token().is_maximum())) {
             dht::token end_token = maximum_token();
             auto s_a_t = sharder.next_shard(start_token);
             if (s_a_t) {
@@ -404,7 +425,7 @@ future<dht::partition_range_vector> subtract_ranges(const schema& schema, const 
             ++range_to_subtract;
             break;
         default:
-            assert(size <= 2);
+            SCYLLA_ASSERT(size <= 2);
         }
         co_await coroutine::maybe_yield();
     }
@@ -423,7 +444,7 @@ dht::token_range_vector split_token_range_msb(unsigned most_significant_bits) {
     }
     uint64_t number_of_ranges = 1 << most_significant_bits;
     ret.reserve(number_of_ranges);
-    assert(most_significant_bits < 64);
+    SCYLLA_ASSERT(most_significant_bits < 64);
     dht::token prev_last_token;
     for (uint64_t i = 0; i < number_of_ranges; i++) {
         std::optional<dht::token_range::bound> start_bound;
@@ -460,11 +481,11 @@ dht::token first_token(const dht::partition_range& pr) {
 
 std::optional<shard_id> is_single_shard(const dht::sharder& sharder, const schema& s, const dht::partition_range& pr) {
     auto token = first_token(pr);
-    auto shard = sharder.shard_of(token);
+    auto shard = sharder.shard_for_reads(token);
     if (pr.is_singular()) {
         return shard;
     }
-    if (auto s_a_t = sharder.next_shard(token)) {
+    if (auto s_a_t = sharder.next_shard_for_reads(token)) {
         dht::ring_position_comparator cmp(s);
         auto end = dht::ring_position_view::for_range_end(pr);
         if (cmp(end, dht::ring_position_view::starting_at(s_a_t->token)) > 0) {
@@ -472,6 +493,46 @@ std::optional<shard_id> is_single_shard(const dht::sharder& sharder, const schem
         }
     }
     return shard;
+}
+
+auto_refreshing_sharder::auto_refreshing_sharder(lw_shared_ptr<replica::table> table, std::optional<write_replica_set_selector> sel)
+    : _table(std::move(table))
+    , _sel(sel)
+{
+    refresh();
+}
+
+auto_refreshing_sharder::~auto_refreshing_sharder() = default;
+
+void
+auto_refreshing_sharder::refresh() {
+    _erm = _table->get_effective_replication_map();
+    _sharder = &_erm->get_sharder(*_table->schema());
+    _callback = _erm->get_validity_abort_source().subscribe([this] () noexcept {
+        refresh();
+    });
+}
+
+unsigned auto_refreshing_sharder::shard_for_reads(const token& t) const {
+    return _sharder->shard_for_reads(t);
+}
+
+dht::shard_replica_set
+auto_refreshing_sharder::shard_for_writes(const token& t, std::optional<write_replica_set_selector> sel) const {
+    if (!sel) {
+        sel = _sel;
+    }
+    return _sharder->shard_for_writes(t, sel);
+}
+
+std::optional<dht::shard_and_token>
+auto_refreshing_sharder::next_shard_for_reads(const dht::token& t) const {
+    return _sharder->next_shard_for_reads(t);
+}
+
+dht::token
+auto_refreshing_sharder::token_for_next_shard_for_reads(const dht::token& t, shard_id shard, unsigned spans) const {
+    return _sharder->token_for_next_shard_for_reads(t, shard, spans);
 }
 
 }

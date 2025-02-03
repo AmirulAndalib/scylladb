@@ -3,13 +3,18 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+#include <fmt/core.h>
 #include <seastar/util/defer.hh>
-#include "test/lib/scylla_test_case.hh"
+#undef SEASTAR_TESTING_MAIN
+#include <seastar/testing/test_case.hh>
+#include <seastar/testing/thread_test_case.hh>
 #include <string>
 #include <boost/range/adaptor/map.hpp>
+#include <fmt/ranges.h>
+#include <fmt/std.h>
 
 #include "cdc/log.hh"
 #include "cdc/cdc_options.hh"
@@ -18,6 +23,7 @@
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/exception_utils.hh"
 #include "test/lib/log.hh"
+#include "test/lib/test_utils.hh"
 #include "transport/messages/result_message.hh"
 
 #include "types/types.hh"
@@ -28,7 +34,9 @@
 
 #include "cql3/column_identifier.hh"
 
+#include "utils/assert.hh"
 #include "utils/UUID_gen.hh"
+#include "utils/to_string.hh"
 
 using namespace std::string_literals;
 
@@ -36,6 +44,8 @@ namespace cdc {
 api::timestamp_type find_timestamp(const mutation&);
 utils::UUID generate_timeuuid(api::timestamp_type);
 }
+
+BOOST_AUTO_TEST_SUITE(cdc_test)
 
 SEASTAR_THREAD_TEST_CASE(test_find_mutation_timestamp) {
     do_with_cql_env_thread([] (cql_test_env& e) {
@@ -251,34 +261,34 @@ SEASTAR_THREAD_TEST_CASE(test_permissions_of_cdc_description) {
 
         for (auto& t : {generations_v2, streams, timestamps}) {
             auto dot_pos = t.find_first_of('.');
-            assert(dot_pos != std::string_view::npos && dot_pos != 0 && dot_pos != t.size() - 1);
+            SCYLLA_ASSERT(dot_pos != std::string_view::npos && dot_pos != 0 && dot_pos != t.size() - 1);
             BOOST_REQUIRE(e.local_db().has_schema(t.substr(0, dot_pos), t.substr(dot_pos + 1)));
 
             // Disallow DROP
-            assert_unauthorized(format("DROP TABLE {}", t));
+            assert_unauthorized(seastar::format("DROP TABLE {}", t));
 
             // Allow SELECT
-            e.execute_cql(format("SELECT * FROM {}", t)).get();
+            e.execute_cql(seastar::format("SELECT * FROM {}", t)).get();
         }
 
         // Disallow ALTER
         for (auto& t : {streams}) {
-            assert_unauthorized(format("ALTER TABLE {} ALTER time TYPE blob", t));
+            assert_unauthorized(seastar::format("ALTER TABLE {} ALTER time TYPE blob", t));
         }
-        assert_unauthorized(format("ALTER TABLE {} ALTER id TYPE blob", generations_v2));
-        assert_unauthorized(format("ALTER TABLE {} ALTER key TYPE blob", timestamps));
+        assert_unauthorized(seastar::format("ALTER TABLE {} ALTER id TYPE blob", generations_v2));
+        assert_unauthorized(seastar::format("ALTER TABLE {} ALTER key TYPE blob", timestamps));
 
         // Allow DELETE
         for (auto& t : {streams}) {
-            e.execute_cql(format("DELETE FROM {} WHERE time = toTimeStamp(now())", t)).get();
+            e.execute_cql(seastar::format("DELETE FROM {} WHERE time = toTimeStamp(now())", t)).get();
         }
-        e.execute_cql(format("DELETE FROM {} WHERE id = uuid()", generations_v2)).get();
-        e.execute_cql(format("DELETE FROM {} WHERE key = 'timestamps'", timestamps)).get();
+        e.execute_cql(seastar::format("DELETE FROM {} WHERE id = uuid()", generations_v2)).get();
+        e.execute_cql(seastar::format("DELETE FROM {} WHERE key = 'timestamps'", timestamps)).get();
 
         // Allow UPDATE, INSERT
-        e.execute_cql(format("INSERT INTO {} (id, range_end) VALUES (uuid(), 0)", generations_v2)).get();
-        e.execute_cql(format("INSERT INTO {} (time, range_end) VALUES (toTimeStamp(now()), 0)", streams)).get();
-        e.execute_cql(format("UPDATE {} SET expired = toTimeStamp(now()) WHERE key = 'timestamps' AND time = toTimeStamp(now())", timestamps)).get();
+        e.execute_cql(seastar::format("INSERT INTO {} (id, range_end) VALUES (uuid(), 0)", generations_v2)).get();
+        e.execute_cql(seastar::format("INSERT INTO {} (time, range_end) VALUES (toTimeStamp(now()), 0)", streams)).get();
+        e.execute_cql(seastar::format("UPDATE {} SET expired = toTimeStamp(now()) WHERE key = 'timestamps' AND time = toTimeStamp(now())", timestamps)).get();
     }).get();
 }
 
@@ -368,11 +378,13 @@ SEASTAR_THREAD_TEST_CASE(test_cdc_log_schema) {
     }).get();
 }
 
+} // cdc_test namespace
+
 static std::vector<std::vector<bytes_opt>> to_bytes(const cql_transport::messages::result_message::rows& rows) {
     auto rs = rows.rs().result_set().rows();
     std::vector<std::vector<bytes_opt>> results;
     for (auto it = rs.begin(); it != rs.end(); ++it) {
-        results.push_back(boost::copy_range<std::vector<bytes_opt>>(*it | boost::adaptors::transformed([] (const managed_bytes_opt& x) { return to_bytes_opt(x); })));
+        results.push_back(*it | std::views::transform([] (const managed_bytes_opt& x) { return to_bytes_opt(x); }) | std::ranges::to<std::vector<bytes_opt>>());
     }
     return results;
 }
@@ -421,6 +433,8 @@ static auto select_log(cql_test_env& e, const sstring& table_name) {
     return rows;
 };
 
+namespace cdc_test {
+
 SEASTAR_THREAD_TEST_CASE(test_primary_key_logging) {
     do_with_cql_env_thread([](cql_test_env& e) {
         cquery_nofail(e, "CREATE TABLE ks.tbl (pk int, pk2 int, ck int, ck2 int, s int STATIC, val int, PRIMARY KEY((pk, pk2), ck, ck2)) WITH cdc = {'enabled':'true'}");
@@ -456,7 +470,7 @@ SEASTAR_THREAD_TEST_CASE(test_primary_key_logging) {
         auto actual_i = results.begin();
         auto actual_end = results.end();
         auto assert_row = [&] (int pk, int pk2, int ck = -1, int ck2 = -1, std::optional<int64_t> ttl = {}) {
-            std::cerr << "check " << pk << " " << pk2 << " " << ck << " " << ck2 << " " << ttl << std::endl;
+            fmt::print(std::cerr, "check {} {} {} {} {}\n", pk, pk2, ck, ck2, ttl);
             BOOST_REQUIRE(actual_i != actual_end);
             auto& actual_row = *actual_i;
             BOOST_REQUIRE_EQUAL(int32_type->decompose(pk), actual_row[1]);
@@ -763,9 +777,9 @@ SEASTAR_THREAD_TEST_CASE(test_ttls) {
     do_with_cql_env_thread([](cql_test_env& e) {
         auto test_ttl = [&e] (int ttl_seconds) {
             const auto base_tbl_name = "tbl" + std::to_string(ttl_seconds);
-            cquery_nofail(e, format("CREATE TABLE ks.{} (pk int, ck int, val int, PRIMARY KEY(pk, ck)) WITH cdc = {{'enabled':'true', 'ttl':{}}}", base_tbl_name, ttl_seconds));
+            cquery_nofail(e, seastar::format("CREATE TABLE ks.{} (pk int, ck int, val int, PRIMARY KEY(pk, ck)) WITH cdc = {{'enabled':'true', 'ttl':{}}}", base_tbl_name, ttl_seconds));
             BOOST_REQUIRE_EQUAL(e.local_db().find_schema("ks", base_tbl_name)->cdc_options().ttl(), ttl_seconds);
-            cquery_nofail(e, format("INSERT INTO ks.{} (pk, ck, val) VALUES(1, 11, 111)", base_tbl_name));
+            cquery_nofail(e, seastar::format("INSERT INTO ks.{} (pk, ck, val) VALUES(1, 11, 111)", base_tbl_name));
 
             auto log_schema = e.local_db().find_schema("ks", cdc::log_name(base_tbl_name));
 
@@ -1120,9 +1134,9 @@ SEASTAR_THREAD_TEST_CASE(test_list_logging) {
             }
         }, [&](data_value v) {
             auto map = value_cast<map_type_impl::native_type>(std::move(v));
-            auto cpy = boost::copy_range<std::vector<data_value>>(map | boost::adaptors::map_values);
+            auto cpy = map | std::views::values | std::ranges::to<std::vector>();
             // verify key is timeuuid
-            for (auto& key : map | boost::adaptors::map_keys) {
+            for (auto& key : map | std::views::keys) {
                 value_cast<utils::UUID>(key);
             }
             return ::make_list_value(list_type, std::move(cpy));
@@ -1300,6 +1314,8 @@ SEASTAR_THREAD_TEST_CASE(test_update_insert_delete_distinction) {
     }).get();
 }
 
+} // namespace cdc_test
+
 static std::vector<std::vector<data_value>> get_result(cql_test_env& e,
         const std::vector<data_type>& col_types, const sstring& query) {
     auto deser = [] (const data_type& t, const bytes_opt& b) -> data_value {
@@ -1324,6 +1340,8 @@ static std::vector<std::vector<data_value>> get_result(cql_test_env& e,
     }
     return res;
 }
+
+namespace cdc_test {
 
 SEASTAR_THREAD_TEST_CASE(test_change_splitting) {
     do_with_cql_env_thread([](cql_test_env& e) {
@@ -1659,11 +1677,11 @@ static void test_pre_post_image(cql_test_env& e, const std::vector<image_persist
         }
 
         // Register new encountered timestamps so that we won't repeat them in next run
-        for (const auto& time : groups | boost::adaptors::map_keys) {
+        for (const auto& time : groups | std::views::keys) {
             processed_times.insert(time);
         }
 
-        BOOST_TEST_MESSAGE(format("Returned rows: {}", groups));
+        BOOST_TEST_MESSAGE(seastar::format("Returned rows: {}", groups));
 
         // Assert that there is the same number of groups differentiated by cdc$time
         BOOST_REQUIRE_EQUAL(groups.size(), t.groups.size());
@@ -1689,12 +1707,12 @@ static void test_pre_post_image(cql_test_env& e, const std::vector<image_persist
                     actual_values.push_back(std::move(actual_value));
                 }
 
-                BOOST_TEST_MESSAGE(format("Looking up corresponding row to {}", actual_values));
+                BOOST_TEST_MESSAGE(seastar::format("Looking up corresponding row to {}", actual_values));
 
                 // Order in pre-postimage is unspecified
                 const auto it = std::find(expected.begin(), expected.end(), actual_values);
                 if (it == expected.end()) {
-                    BOOST_FAIL(format("Failed to find corresponding expected row for {}", actual_values));
+                    BOOST_FAIL(seastar::format("Failed to find corresponding expected row for {}", actual_values));
                 }
                 expected.erase(it);
             }
@@ -2072,3 +2090,5 @@ SEASTAR_THREAD_TEST_CASE(test_image_deleted_column) {
         perform_test(true);
     }).get();
 }
+
+BOOST_AUTO_TEST_SUITE_END()

@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <iostream>
@@ -50,11 +50,6 @@ partition_key partition_key::from_nodetool_style_string(const schema_ptr s, cons
         r.emplace_back(t->from_string(*it++));
     }
     return partition_key::from_range(std::move(r));
-}
-
-std::ostream& operator<<(std::ostream& out, const bound_kind k) {
-    fmt::print(out, "{}", k);
-    return out;
 }
 
 auto fmt::formatter<bound_kind>::format(bound_kind k, fmt::format_context& ctx) const
@@ -115,8 +110,8 @@ const thread_local clustering_key_prefix bound_view::_empty_prefix = clustering_
 
 std::ostream&
 operator<<(std::ostream& os, const exploded_clustering_prefix& ecp) {
-    // Can't pass to_hex() to transformed(), since it is overloaded, so wrap:
+    // Can't pass to_hex() to transform(), since it is overloaded, so wrap:
     auto enhex = [] (auto&& x) { return fmt_hex(x); };
-    fmt::print(os, "prefix{{{}}}", fmt::join(ecp._v | boost::adaptors::transformed(enhex), ":"));
+    fmt::print(os, "prefix{{{}}}", fmt::join(ecp._v | std::views::transform(enhex), ":"));
     return os;
 }

@@ -4,7 +4,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include <seastar/core/sleep.hh>
@@ -137,8 +137,8 @@ future<lowres_clock::duration> cache_hitrate_calculator::recalculate_hitrates() 
     };
 
     auto cf_to_cache_hit_stats = [non_system_filter] (replica::database& db) {
-        return boost::copy_range<std::unordered_map<table_id, stat>>(db.get_tables_metadata().filter(non_system_filter) |
-                boost::adaptors::transformed([]  (const std::pair<table_id, lw_shared_ptr<replica::column_family>>& cf) {
+        return std::ranges::to<std::unordered_map<table_id, stat>>(db.get_tables_metadata().filter(non_system_filter) |
+                std::views::transform([]  (const std::pair<table_id, lw_shared_ptr<replica::column_family>>& cf) {
             auto& stats = cf.second->get_row_cache().stats();
             return std::make_pair(cf.first, stat{float(stats.reads_with_no_misses.rate().rates[0]), float(stats.reads_with_misses.rate().rates[0])});
         }));
@@ -240,10 +240,9 @@ future<> view_update_backlog_broker::start() {
         // Gossiper runs only on shard 0, and there's no API to add multiple, per-shard application states.
         // Also, right now we aggregate all backlogs, since the coordinator doesn't keep per-replica shard backlogs.
         _started = seastar::async([this] {
-            std::optional<db::view::update_backlog> backlog_published;
             while (!_as.abort_requested()) {
-                auto backlog = _sp.local().get_view_update_backlog();
-                if (backlog_published && *backlog_published == backlog) {
+                auto backlog = _sp.local().get_view_update_backlog_if_changed().get();
+                if (!backlog) {
                     sleep_abortable(gms::gossiper::INTERVAL, _as).get();
                     continue;
                 }
@@ -252,8 +251,7 @@ future<> view_update_backlog_broker::start() {
                 //FIXME: discarded future.
                 (void)_gossiper.add_local_application_state(
                         gms::application_state::VIEW_BACKLOG,
-                        gms::versioned_value(seastar::format("{}:{}:{}", backlog.current, backlog.max, now)));
-                backlog_published = backlog;
+                        gms::versioned_value(seastar::format("{}:{}:{}", backlog->get_current_bytes(), backlog->get_max_bytes(), now)));
                 sleep_abortable(gms::gossiper::INTERVAL, _as).get();
             }
         }).handle_exception_type([] (const seastar::sleep_aborted& ignored) { });
@@ -270,36 +268,44 @@ future<> view_update_backlog_broker::stop() {
 
 future<> view_update_backlog_broker::on_change(gms::inet_address endpoint, const gms::application_state_map& states, gms::permit_id pid) {
     return on_application_state_change(endpoint, states, gms::application_state::VIEW_BACKLOG, pid, [this] (gms::inet_address endpoint, const gms::versioned_value& value, gms::permit_id) {
+        if (utils::get_local_injector().enter("skip_updating_local_backlog_via_view_update_backlog_broker")) {
+            return make_ready_future<>();
+        }
+
         size_t current;
         size_t max;
         api::timestamp_type ticks;
         const char* start_bound = value.value().data();
         char* end_bound;
         for (auto* ptr : {&current, &max}) {
+            errno = 0;
             *ptr = std::strtoull(start_bound, &end_bound, 10);
-            if (*ptr == ULLONG_MAX) {
-                return make_ready_future();;
+            if (errno == ERANGE) {
+                return make_ready_future();
             }
             start_bound = end_bound + 1;
         }
         if (max == 0) {
             return make_ready_future();
         }
+        errno = 0;
         ticks = std::strtoll(start_bound, &end_bound, 10);
-        if (ticks == 0 || ticks == LLONG_MAX || end_bound != value.value().data() + value.value().size()) {
+        if (ticks == 0 || errno == ERANGE || end_bound != value.value().data() + value.value().size()) {
             return make_ready_future();
         }
         auto backlog = view_update_backlog_timestamped{db::view::update_backlog{current, max}, ticks};
-        auto[it, inserted] = _sp.local()._view_update_backlogs.try_emplace(endpoint, std::move(backlog));
-        if (!inserted && it->second.ts < backlog.ts) {
-            it->second = std::move(backlog);
-        }
-        return make_ready_future();
+        return _sp.invoke_on_all([id = _gossiper.get_host_id(endpoint), backlog] (service::storage_proxy& sp) {
+            auto[it, inserted] = sp._view_update_backlogs.try_emplace(id, backlog);
+            if (!inserted && it->second.ts < backlog.ts) {
+                it->second = backlog;
+            }
+            return make_ready_future();
+        });
     });
 }
 
 future<> view_update_backlog_broker::on_remove(gms::inet_address endpoint, gms::permit_id) {
-    _sp.local()._view_update_backlogs.erase(endpoint);
+    _sp.local()._view_update_backlogs.erase(_gossiper.get_host_id(endpoint));
     return make_ready_future();
 }
 

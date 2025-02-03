@@ -3,15 +3,14 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
-#include <boost/dynamic_bitset.hpp>
+#include <boost/dynamic_bitset.hpp>  // IWYU pragma: keep
 #include "replica/database_fwd.hh"
 #include "timestamp.hh"
-#include <seastar/util/noncopyable_function.hh>
 
 class mutation;
 

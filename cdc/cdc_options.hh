@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -66,10 +66,10 @@ public:
 
 } // namespace cdc
 
-template <> struct fmt::formatter<cdc::image_mode> : fmt::formatter<std::string_view> {
+template <> struct fmt::formatter<cdc::image_mode> : fmt::formatter<string_view> {
     auto format(cdc::image_mode, fmt::format_context& ctx) const -> decltype(ctx.out());
 };
 
-template <> struct fmt::formatter<cdc::delta_mode> : fmt::formatter<std::string_view> {
+template <> struct fmt::formatter<cdc::delta_mode> : fmt::formatter<string_view> {
     auto format(cdc::delta_mode, fmt::format_context& ctx) const -> decltype(ctx.out());
 };

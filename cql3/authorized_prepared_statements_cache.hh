@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -59,7 +59,8 @@ public:
     bool operator==(const authorized_prepared_statements_cache_key&) const = default;
 
     static size_t hash(const auth::authenticated_user& user, const cql3::prepared_cache_key_type::cache_key_type& prep_cache_key) {
-        return utils::hash_combine(std::hash<auth::authenticated_user>()(user), utils::tuple_hash()(prep_cache_key));
+        return utils::hash_combine(std::hash<auth::authenticated_user>()(user),
+                                   std::hash<cql3::prepared_cache_key_type::cache_key_type>()(prep_cache_key));
     }
 };
 

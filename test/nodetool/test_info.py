@@ -1,14 +1,16 @@
 #
 # Copyright 2023-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
 import random
 from typing import NamedTuple
+
 import pytest
-from rest_api_mock import expected_request
-from utils import format_size
+
+from test.nodetool.rest_api_mock import expected_request
+from test.nodetool.utils import format_size
 
 
 class moving_average(NamedTuple):
@@ -98,7 +100,7 @@ def test_info(request, nodetool, display_all_tokens):
     expected_requests = [
         expected_request('GET', '/storage_service/gossiping', response=True),
         expected_request('GET', '/storage_service/hostid/local', response=host_id),
-        expected_request('GET', '/storage_service/rpc_server', response=True),
+        expected_request('GET', '/storage_service/rpc_server', response=False),
         expected_request('GET', '/storage_service/native_transport', response=True),
         expected_request('GET', '/storage_service/load', response=load),
         expected_request('GET', '/storage_service/generation_number', response=generation_number),
@@ -173,7 +175,7 @@ def test_info(request, nodetool, display_all_tokens):
     expected_output = f'''\
 {'ID':<23}: {host_id}
 {'Gossip active':<23}: true
-{'Thrift active':<23}: true
+{'Thrift active':<23}: false
 {'Native Transport active':<23}: true
 {'Load':<23}: {format_size(load)}
 {'Generation No':<23}: {generation_number}
@@ -210,5 +212,5 @@ def test_info(request, nodetool, display_all_tokens):
     args = []
     if display_all_tokens:
         args.append('--tokens')
-    actual_output = nodetool("info", *args, expected_requests=expected_requests)
-    assert normalize_output(actual_output) == normalize_output(expected_output)
+    res = nodetool("info", *args, expected_requests=expected_requests)
+    assert normalize_output(res.stdout) == normalize_output(expected_output)

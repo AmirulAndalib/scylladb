@@ -1,6 +1,6 @@
 # Copyright 2020-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 
 # Tests for the FilterExpression parameter of the Query and Scan operations.
 # FilterExpression is a newer version of the older "QueryFilter" and
@@ -9,7 +9,7 @@
 import pytest
 from botocore.exceptions import ClientError
 import random
-from util import full_query, full_query_and_counts, full_scan, random_string, random_bytes, multiset
+from test.alternator.util import full_query, full_query_and_counts, full_scan, random_string, random_bytes, multiset
 
 # The test_table_sn_with_data fixture is the regular test_table_sn fixture
 # with a partition inserted with many items. The sort key 'c' of the items

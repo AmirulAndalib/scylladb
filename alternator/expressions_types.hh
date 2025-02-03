@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -66,7 +66,6 @@ public:
     std::vector<std::variant<std::string, unsigned>>& operators() {
         return _operators;
     }
-    friend std::ostream& operator<<(std::ostream&, const path&);
 };
 
 // When an expression is first parsed, all constants are references, like
@@ -256,6 +255,6 @@ public:
 } // namespace parsed
 } // namespace alternator
 
-template <> struct fmt::formatter<alternator::parsed::path> : fmt::formatter<std::string_view> {
+template <> struct fmt::formatter<alternator::parsed::path> : fmt::formatter<string_view> {
     auto format(const alternator::parsed::path&, fmt::format_context& ctx) const -> decltype(ctx.out());
 };

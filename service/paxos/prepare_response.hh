@@ -4,7 +4,7 @@
  * Modified by ScyllaDB
  */
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
@@ -73,6 +73,6 @@ using prepare_response = std::variant<utils::UUID, promise>;
 
 } // end of namespace "service"
 
-template <> struct fmt::formatter<service::paxos::promise> : fmt::formatter<std::string_view> {
+template <> struct fmt::formatter<service::paxos::promise> : fmt::formatter<string_view> {
     auto format(const service::paxos::promise&, fmt::format_context& ctx) const -> decltype(ctx.out());
 };

@@ -10,7 +10,7 @@ considering a pull request for merging.
 
 The command
 
-    git config --global rerere.enabled true
+    git config set --global rerere.enabled true
 
 will record merge conflict resolutions and replay them
 when git encounters the same conflict. This is helpful
@@ -21,7 +21,7 @@ when managing multiple branches that see similar conflicts.
 
 The command
 
-    git config --global diff.conflictstyle = diff3
+    git config set --global diff.conflictstyle diff3
 
 will set the conflict markers to three-way diff style.
 This records not only "ours" and "theirs", but also the
@@ -178,10 +178,11 @@ latest submodules.
     commit log editor for every submodule to show that commits are being
     updated.
  3. Edit the submodule update commits with any necessary additional
-    imformation. For example, amend the message with `Fixes` tags.
- 4. Use `git push` to publish your work.
+    information. For example, amend the message with `Fixes` tags.
+ 4. Use `git push` to push the submodule update commits to the remote
+    `next` branch.
 
-By default refresh-submodules.sh will refresh all submodules from their
+By default `refresh-submodules.sh` will refresh all submodules from their
 master branches. It's possible to specify submodules and branches as command
 line arguments. Each is treated by the script as `name[:branch]`, so for
 example the `refresh-submodules.sh seastar` will only refresh the seastar
@@ -219,7 +220,7 @@ creating a Seastar branch. This is done in a separate repository:
  4. Create a new branch (e.g. `git checkout -b branch-3.2`)
     corresponding to the release series you are backporting to.
     Note, the regular branch name is used, not the next branch.
- 5. Use `git push -u scylla-seastar branch-3.2' to publish the
+ 5. Use `git push -u scylla-seastar branch-3.2` to publish the
     branch. Note, scylla-seastar here is a git remote that refers
     to https://github.com/scylladb/scylla-seastar.git, a
     repository used for holding seastar backports for scylla.git.
@@ -290,6 +291,8 @@ These exceptions are for commits that are administrative in nature.
 1. submodule updates (the submodule's commits will have been reviewed separately)
 
 2. frozen toolchain updates (changes to tools/toolchain/image; these only refresh external package versions)
+
+3. backports (maintainers are already allowed to backport their own code, opening a PR to get a CI run for a backport doesn't change this)
 
 ## Guidelines for evaluating backports
 

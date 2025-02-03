@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -31,6 +31,6 @@ public:
     bool operator==(const tombstone_gc_options&) const = default;
 };
 
-template <> struct fmt::formatter<tombstone_gc_mode> : fmt::formatter<std::string_view> {
+template <> struct fmt::formatter<tombstone_gc_mode> : fmt::formatter<string_view> {
     auto format(tombstone_gc_mode mode, fmt::format_context& ctx) const -> decltype(ctx.out());
 };

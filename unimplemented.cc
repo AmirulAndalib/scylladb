@@ -3,14 +3,14 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <unordered_map>
 #include "unimplemented.hh"
 #include <seastar/core/sstring.hh>
 #include <seastar/core/enum.hh>
-#include "log.hh"
+#include "utils/log.hh"
 #include "seastarx.hh"
 
 namespace unimplemented {
@@ -35,7 +35,6 @@ std::string_view format_as(cause c) {
         case cause::LEGACY_COMPOSITE_KEYS: return "LEGACY_COMPOSITE_KEYS";
         case cause::COLLECTION_RANGE_TOMBSTONES: return "COLLECTION_RANGE_TOMBSTONES";
         case cause::RANGE_DELETES: return "RANGE_DELETES";
-        case cause::THRIFT: return "THRIFT";
         case cause::VALIDATION: return "VALIDATION";
         case cause::REVERSED: return "REVERSED";
         case cause::COMPRESSION: return "COMPRESSION";

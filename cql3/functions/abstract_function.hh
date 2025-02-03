@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
@@ -19,7 +19,7 @@
 #include <fmt/core.h>
 
 
-template <> struct fmt::formatter<std::vector<data_type>> : fmt::formatter<std::string_view> {
+template <> struct fmt::formatter<std::vector<data_type>> : fmt::formatter<string_view> {
     auto format(const std::vector<data_type>& arg_types, fmt::format_context& ctx) const -> decltype(ctx.out());
 };
 
@@ -63,7 +63,7 @@ public:
     }
 
     virtual sstring column_name(const std::vector<sstring>& column_names) const override {
-        return format("{}({})", _name, fmt::join(column_names, ", "));
+        return seastar::format("{}({})", _name, fmt::join(column_names, ", "));
     }
 
     virtual void print(std::ostream& os) const override;

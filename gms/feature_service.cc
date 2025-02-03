@@ -1,5 +1,5 @@
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  *
  * Copyright (C) 2020-present ScyllaDB
  */
@@ -7,16 +7,16 @@
 #include <seastar/core/sstring.hh>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/smp.hh>
-#include "log.hh"
+#include "utils/log.hh"
 #include "db/config.hh"
 #include "gms/feature.hh"
 #include "gms/feature_service.hh"
 #include "db/system_keyspace.hh"
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/split.hpp>
-#include <boost/range/adaptor/map.hpp>
 #include "gms/gossiper.hh"
 #include "gms/i_endpoint_state_change_subscriber.hh"
+#include "utils/assert.hh"
 #include "utils/error_injection.hh"
 #include "service/storage_service.hh"
 
@@ -40,6 +40,10 @@ feature_config::feature_config() {
 }
 
 feature_service::feature_service(feature_config cfg) : _config(cfg) {
+#ifdef SCYLLA_ENABLE_ERROR_INJECTION
+    initialize_suppressed_features_set();
+#endif
+
     if (is_test_only_feature_deprecated()) {
         // Assume it's enabled
         test_only_feature.enable();
@@ -59,7 +63,7 @@ feature_config feature_config_from_db_config(const db::config& cfg, std::set<sst
     case sstables::sstable_version_types::me:
         break;
     default:
-        assert(false && "Invalid sstable_format");
+        SCYLLA_ASSERT(false && "Invalid sstable_format");
     }
 
     if (!cfg.enable_user_defined_functions()) {
@@ -78,10 +82,14 @@ feature_config feature_config_from_db_config(const db::config& cfg, std::set<sst
     if (!cfg.check_experimental(db::experimental_features_t::feature::KEYSPACE_STORAGE_OPTIONS)) {
         fcfg._disabled_features.insert("KEYSPACE_STORAGE_OPTIONS"s);
     }
-    if (!cfg.check_experimental(db::experimental_features_t::feature::CONSISTENT_TOPOLOGY_CHANGES)) {
-        fcfg._disabled_features.insert("SUPPORTS_CONSISTENT_TOPOLOGY_CHANGES"s);
+    if (!cfg.check_experimental(db::experimental_features_t::feature::VIEWS_WITH_TABLETS)) {
+        fcfg._disabled_features.insert("VIEWS_WITH_TABLETS"s);
     }
-    if (!cfg.check_experimental(db::experimental_features_t::feature::TABLETS)) {
+    if (cfg.force_gossip_topology_changes()) {
+        if (cfg.enable_tablets()) {
+            throw std::runtime_error("Tablets cannot be enabled with gossip topology changes.  Use either --enable-tablets or --force-gossip-topology-changes, not both.");
+        }
+        logger.warn("The tablets feature is disabled due to forced gossip topology changes");
         fcfg._disabled_features.insert("TABLETS"s);
     }
     if (!cfg.uuid_sstable_identifiers_enabled()) {
@@ -89,6 +97,9 @@ feature_config feature_config_from_db_config(const db::config& cfg, std::set<sst
     }
     if (!cfg.table_digest_insensitive_to_expiry()) {
         fcfg._disabled_features.insert("TABLE_DIGEST_INSENSITIVE_TO_EXPIRY"s);
+    }
+    if (!cfg.commitlog_use_fragmented_entries()) {
+        fcfg._disabled_features.insert("FRAGMENTED_COMMITLOG_ENTRIES"s);
     }
 
     if (!is_test_only_feature_enabled()) {
@@ -102,9 +113,17 @@ future<> feature_service::stop() {
     return make_ready_future<>();
 }
 
+#ifdef SCYLLA_ENABLE_ERROR_INJECTION
+void feature_service::initialize_suppressed_features_set() {
+    if (const auto features_list = utils::get_local_injector().inject_parameter<std::string_view>("suppress_features"); features_list) {
+        boost::split(_suppressed_features, *features_list, boost::is_any_of(";"));
+    }
+}
+#endif
+
 void feature_service::register_feature(feature& f) {
     auto i = _registered_features.emplace(f.name(), f);
-    assert(i.second);
+    SCYLLA_ASSERT(i.second);
 }
 
 void feature_service::unregister_feature(feature& f) {
@@ -136,6 +155,18 @@ std::set<std::string_view> feature_service::supported_feature_set() const {
         "MC_SSTABLE_FORMAT"sv,
         "COMPUTED_COLUMNS"sv,
         "SCHEMA_COMMITLOG"sv,
+        "MD_SSTABLE_FORMAT"sv,
+        "ME_SSTABLE_FORMAT"sv,
+        "VIEW_VIRTUAL_COLUMNS"sv,
+        "DIGEST_INSENSITIVE_TO_EXPIRY"sv,
+        "CDC"sv,
+        "NONFROZEN_UDTS"sv,
+        "HINTED_HANDOFF_SEPARATE_CONNECTION"sv,
+        "LWT"sv,
+        "PER_TABLE_PARTITIONERS"sv,
+        "PER_TABLE_CACHING"sv,
+        "DIGEST_FOR_NULL_VALUES"sv,
+        "CORRECT_IDX_TOKEN_IN_SECONDARY_INDEX"sv,
     };
 
     if (is_test_only_feature_deprecated()) {
@@ -149,6 +180,13 @@ std::set<std::string_view> feature_service::supported_feature_set() const {
     for (const sstring& s : _config._disabled_features) {
         features.erase(s);
     }
+
+#ifdef SCYLLA_ENABLE_ERROR_INJECTION
+    for (auto& sf: _suppressed_features) {
+        features.erase(sf);
+    }
+#endif
+
     return features;
 }
 
@@ -191,16 +229,14 @@ void feature::enable() {
 
 db::schema_features feature_service::cluster_schema_features() const {
     db::schema_features f;
-    f.set_if<db::schema_feature::VIEW_VIRTUAL_COLUMNS>(view_virtual_columns);
-    f.set_if<db::schema_feature::DIGEST_INSENSITIVE_TO_EXPIRY>(digest_insensitive_to_expiry);
+    f.set<db::schema_feature::DIGEST_INSENSITIVE_TO_EXPIRY>();
     f.set<db::schema_feature::COMPUTED_COLUMNS>();
-    f.set_if<db::schema_feature::CDC_OPTIONS>(cdc);
-    f.set_if<db::schema_feature::PER_TABLE_PARTITIONERS>(per_table_partitioners);
     f.set_if<db::schema_feature::SCYLLA_KEYSPACES>(keyspace_storage_options);
     f.set_if<db::schema_feature::SCYLLA_KEYSPACES>(tablets);
     f.set_if<db::schema_feature::SCYLLA_AGGREGATES>(aggregate_storage_options);
     f.set_if<db::schema_feature::TABLE_DIGEST_INSENSITIVE_TO_EXPIRY>(table_digest_insensitive_to_expiry);
     f.set_if<db::schema_feature::GROUP0_SCHEMA_VERSIONING>(group0_schema_versioning);
+    f.set_if<db::schema_feature::IN_MEMORY_TABLES>(bool(in_memory_tables));
     return f;
 }
 
@@ -257,16 +293,11 @@ future<> feature_service::enable_features_on_startup(db::system_keyspace& sys_ks
     std::set<sstring> persisted_features;
     std::set<sstring> persisted_unsafe_to_disable_features;
 
-    bool fall_back_to_legacy = true;
-    if (_config.use_raft_cluster_features) {
-        auto topo_features = co_await sys_ks.load_topology_features_state();
-        if (topo_features) {
-            persisted_unsafe_to_disable_features = topo_features->calculate_not_yet_enabled_features();
-            persisted_features = std::move(topo_features->enabled_features);
-            fall_back_to_legacy = false;
-        }
-    }
-    if (fall_back_to_legacy) {
+    auto topo_features = co_await sys_ks.load_topology_features_state();
+    if (topo_features) {
+        persisted_unsafe_to_disable_features = topo_features->calculate_not_yet_enabled_features();
+        persisted_features = std::move(topo_features->enabled_features);
+    } else {
         persisted_features = co_await sys_ks.load_local_enabled_features();
     }
 
@@ -280,7 +311,7 @@ future<> feature_service::enable_features_on_startup(db::system_keyspace& sys_ks
     }
 
     co_await container().invoke_on_all([&features_to_enable] (auto& srv) -> future<> {
-        std::set<std::string_view> feat = boost::copy_range<std::set<std::string_view>>(features_to_enable);
+        auto feat = features_to_enable | std::ranges::to<std::set<std::string_view>>();
         co_await srv.enable(std::move(feat));
     });
 }
@@ -344,7 +375,7 @@ future<> persistent_feature_enabler::enable_features() {
     // The key itself is maintained as an `unordered_set<string>` and serialized via `to_string`
     // function to preserve readability.
     std::set<sstring> feats_set = co_await _sys_ks.load_local_enabled_features();
-    for (feature& f : _feat.registered_features() | boost::adaptors::map_values) {
+    for (feature& f : _feat.registered_features() | std::views::values) {
         if (!f && features.contains(f.name())) {
             feats_set.emplace(f.name());
         }
@@ -352,7 +383,7 @@ future<> persistent_feature_enabler::enable_features() {
     co_await _sys_ks.save_local_enabled_features(std::move(feats_set), true);
 
     co_await _feat.container().invoke_on_all([&features] (feature_service& fs) -> future<> {
-        std::set<std::string_view> features_v = boost::copy_range<std::set<std::string_view>>(features);
+        auto features_v = features | std::ranges::to<std::set<std::string_view>>();
         co_await fs.enable(std::move(features_v));
     });
 }
@@ -360,7 +391,7 @@ future<> persistent_feature_enabler::enable_features() {
 future<> feature_service::enable(std::set<std::string_view> list) {
     // `gms::feature::enable` should be run within a seastar thread context
     return seastar::async([this, list = std::move(list)] {
-        for (gms::feature& f : _registered_features | boost::adaptors::map_values) {
+        for (gms::feature& f : _registered_features | std::views::values) {
             if (list.contains(f.name())) {
                 f.enable();
             }

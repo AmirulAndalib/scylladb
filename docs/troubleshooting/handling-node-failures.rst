@@ -70,8 +70,7 @@ Manual Recovery Procedure
 You can follow the manual recovery procedure when:
 
 * The majority of nodes (for example, 2 out of 3) failed and are irrecoverable.
-* :ref:`The Raft upgrade procedure <verify-raft-procedure>` got stuck because one 
-  of the nodes failed in the middle of the procedure and is irrecoverable.
+* .. scylladb_include_flag:: enabling-consistent-topology-failure.rst
 
 .. warning::
 
@@ -79,16 +78,10 @@ You can follow the manual recovery procedure when:
    **irrecoverable** nodes. If possible, restart your nodes, and use the manual 
    recovery procedure as a last resort.
 
-.. note::
+.. warning::
 
-   Before proceeding, make sure that the irrecoverable nodes are truly dead, and not, 
-   for example, temporarily partitioned away due to a network failure. If it is 
-   possible for the 'dead' nodes to come back to life, they might communicate and 
-   interfere with the recovery procedure and cause unpredictable problems.
-
-   If you have no means of ensuring that these irrecoverable nodes won't come back 
-   to life and communicate with the rest of the cluster, setup firewall rules or otherwise 
-   isolate your alive nodes to reject any communication attempts from these dead nodes.
+  The manual recovery procedure is not supported :doc:`if tablets are enabled on any of your keyspaces </architecture/tablets/>`. 
+  In such a case, you need to :doc:`restore from backup </operating-scylla/procedures/backup-restore/restore>`. 
 
 During the manual recovery procedure you'll enter a special ``RECOVERY`` mode, remove 
 all faulty nodes (using the standard :doc:`node removal procedure </operating-scylla/procedures/cluster-management/remove-node/>`), 
@@ -98,15 +91,26 @@ perform the Raft upgrade procedure again, initializing the Raft algorithm from s
 The manual recovery procedure is applicable both to clusters that were not running Raft 
 in the past and then had Raft enabled, and to clusters that were bootstrapped using Raft.
 
-.. note::
+**Prerequisites**
 
-   Entering ``RECOVERY`` mode requires a node restart. Restarting an additional node while 
-   some nodes are already dead may lead to unavailability of data queries (assuming that 
-   you haven't lost it already). For example, if you're using the standard RF=3, 
-   CL=QUORUM setup, and you're recovering from a stuck of upgrade procedure because one 
-   of your nodes is dead, restarting another node will cause temporary data query 
-   unavailability (until the node finishes restarting). Prepare your service for 
-   downtime before proceeding.
+* Before proceeding, make sure that the irrecoverable nodes are truly dead, and not, 
+  for example, temporarily partitioned away due to a network failure. If it is 
+  possible for the 'dead' nodes to come back to life, they might communicate and 
+  interfere with the recovery procedure and cause unpredictable problems.
+
+  If you have no means of ensuring that these irrecoverable nodes won't come back 
+  to life and communicate with the rest of the cluster, setup firewall rules or otherwise 
+  isolate your alive nodes to reject any communication attempts from these dead nodes.
+
+* Prepare your service for downtime before proceeding.
+  Entering ``RECOVERY`` mode requires a node restart. Restarting an additional node while 
+  some nodes are already dead may lead to unavailability of data queries (assuming that 
+  you haven't lost it already). For example, if you're using the standard RF=3, 
+  CL=QUORUM setup, and you're recovering from a stuck upgrade procedure because one 
+  of your nodes is dead, restarting another node will cause temporary data query 
+  unavailability (until the node finishes restarting). 
+
+**Procedure**
 
 #. Perform the following query on **every alive node** in the cluster, using e.g. ``cqlsh``:
 
@@ -130,6 +134,7 @@ in the past and then had Raft enabled, and to clusters that were bootstrapped us
 
    .. code-block:: cql
 
+        cqlsh> TRUNCATE TABLE system.topology;
         cqlsh> TRUNCATE TABLE system.discovery;
         cqlsh> TRUNCATE TABLE system.group0_history;
         cqlsh> DELETE value FROM system.scylla_local WHERE key = 'raft_group0_id';
@@ -145,3 +150,5 @@ in the past and then had Raft enabled, and to clusters that were bootstrapped us
 #. Perform a :doc:`rolling restart </operating-scylla/procedures/config-change/rolling-restart/>` of your alive nodes.
 
 #. The Raft upgrade procedure will start anew. :ref:`Verify <verify-raft-procedure>` that it finishes successfully.
+
+#. .. scylladb_include_flag:: enable-consistent-topology.rst

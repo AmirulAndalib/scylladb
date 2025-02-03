@@ -11,19 +11,37 @@ sys.path.insert(0, os.path.abspath('./_ext'))
 sys.path.insert(0, os.path.abspath(".."))
 
 # -- Global variables
+FLAG = os.getenv('FLAG', 'manual')
 
+# Set the project name
+PROJECT = "ScyllaDB Manual"
 # Set the base URL for the documentation site.
-BASE_URL = 'https://opensource.docs.scylladb.com'
+BASE_URL = 'https://docs.scylladb.com/manual'
 # Build documentation for the following tags and branches.
 TAGS = []
-BRANCHES = ["master", "branch-5.1", "branch-5.2", "branch-5.4"]
+BRANCHES = ["master", "branch-6.2"]
 # Set the latest version. 
-LATEST_VERSION = "branch-5.4"
+LATEST_VERSION = "branch-6.2"
 # Set which versions are not released yet.
 UNSTABLE_VERSIONS = ["master"]
 # Set which versions are deprecated.
 DEPRECATED_VERSIONS = [""]
 
+if FLAG == 'opensource':
+    # Set the project name
+    PROJECT = "ScyllaDB Open Source"
+    # Set the base URL for the documentation site.
+    BASE_URL = 'https://opensource.docs.scylladb.com'
+    # Build documentation for the following tags and branches.
+    TAGS = []
+    BRANCHES = ["master", "branch-5.1", "branch-5.2", "branch-5.4", "branch-6.0", "branch-6.1", "branch-6.2"]
+    # Set the latest version. 
+    LATEST_VERSION = "branch-6.2"
+    # Set which versions are not released yet.
+    UNSTABLE_VERSIONS = ["master"]
+    # Set which versions are deprecated.
+    DEPRECATED_VERSIONS = [""]
+    
 # -- General configuration
 
 # Add any Sphinx extension module names here, as strings.
@@ -43,7 +61,9 @@ extensions = [
     "scylladb_azure_images",
     "scylladb_gcp_images",
     "scylladb_include_flag",
-    "scylladb_dynamic_substitutions"
+    "scylladb_dynamic_substitutions",
+    "scylladb_swagger",
+    "scylladb_metrics"
 ]
 
 # The suffix(es) of source filenames.
@@ -53,7 +73,7 @@ source_suffix = ['.rst']
 master_doc = "index"
 
 # General information about the project.
-project = "ScyllaDB Open Source"
+project = PROJECT
 copyright = str(date.today().year) + ", ScyllaDB. All rights reserved."
 author = u"ScyllaDB Project Contributors"
 
@@ -121,6 +141,15 @@ scylladb_gcp_images_base_url = "https://s3.amazonaws.com/downloads.scylladb.com"
 scylladb_gcp_images_bucket_directory = "downloads/scylla/gce/"
 scylladb_gcp_images_download_directory = "_data/opensource/gce"
 
+# -- Options for scylladb_swagger extension
+scylladb_swagger_origin_api = "../api"
+scylladb_swagger_template = "swagger.tmpl"
+scylladb_swagger_inc_template = "swagger_inc.tmpl"
+
+# -- Options for scylladb_metrics
+scylladb_metrics_directory = "_data/opensource/metrics"
+
+
 # -- Options for HTML output
 
 # The theme to use for pages.
@@ -146,6 +175,7 @@ html_theme_options = {
     "hide_feedback_buttons": 'false',
     "github_issues_repository": "scylladb/scylladb",
     "github_repository": "scylladb/scylladb",
+    "github_label": "type/documentation",
     "versions_unstable": UNSTABLE_VERSIONS,
     "versions_deprecated": DEPRECATED_VERSIONS,
     'banner_button_text': 'Register for Free',
@@ -168,3 +198,7 @@ html_baseurl = BASE_URL
 
 # Dictionary of values to pass into the template engine’s context for all pages
 html_context = {"html_baseurl": html_baseurl}
+
+def setup(app):
+    if 'opensource' in app.tags:
+        app.tags.add('experimental')

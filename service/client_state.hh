@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
@@ -69,7 +69,6 @@ private:
             , _user(cs->_user)
             , _auth_state(cs->_auth_state)
             , _is_internal(cs->_is_internal)
-            , _is_thrift(cs->_is_thrift)
             , _remote_address(cs->_remote_address)
             , _auth_service(auth_service ? &auth_service->local() : nullptr)
             , _sl_controller(sl_controller ? &sl_controller->local() : nullptr)
@@ -110,7 +109,6 @@ private:
     // isInternal is used to mark ClientState as used by some internal component
     // that should have an ability to modify system keyspace.
     bool _is_internal;
-    bool _is_thrift;
 
     // The biggest timestamp that was returned by getTimestamp/assigned to a query
     static thread_local api::timestamp_type _last_timestamp_micros;
@@ -162,10 +160,8 @@ public:
                  auth::service& auth_service,
                  qos::service_level_controller* sl_controller,
                  timeout_config timeout_config,
-                 const socket_address& remote_address = socket_address(),
-                 bool thrift = false)
+                 const socket_address& remote_address = socket_address())
             : _is_internal(false)
-            , _is_thrift(thrift)
             , _remote_address(remote_address)
             , _auth_service(&auth_service)
             , _sl_controller(sl_controller)
@@ -202,7 +198,6 @@ public:
     client_state(internal_tag, const timeout_config& config)
             : _keyspace("system")
             , _is_internal(true)
-            , _is_thrift(false)
             , _default_timeout_config(config)
             , _timeout_config(config)
     {}
@@ -211,7 +206,6 @@ public:
         : _user(auth::authenticated_user(username))
         , _auth_state(auth_state::READY)
         , _is_internal(true)
-        , _is_thrift(false)
         , _auth_service(&auth_service)
         , _sl_controller(&sl_controller)
     {}
@@ -222,12 +216,8 @@ public:
     ///
     /// `nullptr` for internal instances.
     ///
-    const auth::service* get_auth_service() const {
+    auth::service* get_auth_service() const {
         return _auth_service;
-    }
-
-    bool is_thrift() const {
-        return _is_thrift;
     }
 
     bool is_internal() const {
@@ -356,6 +346,7 @@ public:
     future<bool> check_has_permission(auth::command_desc) const;
     future<> ensure_has_permission(auth::command_desc) const;
     future<> maybe_update_per_service_level_params();
+    void update_per_service_level_params(qos::service_level_options& slo);
 
     /**
      * Returns an exceptional future with \ref exceptions::invalid_request_exception if the resource does not exist.

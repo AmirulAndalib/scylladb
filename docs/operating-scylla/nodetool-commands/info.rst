@@ -17,7 +17,7 @@ Example output:
 
     ID                     : 2110829b-47f2-4a6b-b87e-a81bc3b5cb31
     Gossip active          : true
-    Thrift active          : true
+    Thrift active          : false
     Native Transport active: true
     Load                   : 294.44 MB
     Generation No          : 1474434958
@@ -83,7 +83,7 @@ Example output:
 |           |                              |
 |           |                              |
 +-----------+------------------------------+
-| Heap      |Not applicable with Scylla    |
+| Heap      |Not applicable with ScyllaDB  |
 | Memory    |                              |
 | (MB)      |                              |
 |           |                              |
@@ -116,12 +116,12 @@ Example output:
 |           |                              |
 |           |                              |
 +-----------+------------------------------+
-| Exceptions|Not applicable with Scylla    |
+| Exceptions|Not applicable with ScyllaDB  |
 |           |                              |
 |           |                              |
 |           |                              |
 +-----------+------------------------------+
-| Key       |Not applicable with Scylla    |
+| Key       |Not applicable with ScyllaDB  |
 | Cache     |                              |
 |           |                              |
 |           |                              |
@@ -129,7 +129,7 @@ Example output:
 | Row       |Row Cache usage               |
 | Cache     |                              |
 +-----------+------------------------------+
-| Counter   |Not applicable with Scylla    |
+| Counter   |Not applicable with ScyllaDB  |
 | Cache     |                              |
 |           |                              |
 |           |                              |

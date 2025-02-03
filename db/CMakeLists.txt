@@ -2,12 +2,12 @@ add_library(db STATIC)
 target_sources(db
   PRIVATE
     consistency_level.cc
-    system_auth_keyspace.cc
     system_keyspace.cc
     virtual_table.cc
     virtual_tables.cc
     system_distributed_keyspace.cc
     size_estimates_virtual_reader.cc
+    schema_applier.cc
     schema_tables.cc
     cql_type_parser.cc
     legacy_schema_migrator.cc
@@ -35,6 +35,7 @@ target_sources(db
     view/row_locking.cc
     sstables-format-selector.cc
     snapshot-ctl.cc
+    snapshot/backup_task.cc
     rate_limiter.cc
     per_partition_rate_limit_options.cc)
 target_include_directories(db
@@ -45,6 +46,7 @@ target_link_libraries(db
     mutation
     Seastar::seastar
     xxHash::xxhash
+    absl::headers
   PRIVATE
     data_dictionary
     cql3)

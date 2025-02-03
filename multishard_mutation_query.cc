@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "schema/schema_registry.hh"
@@ -18,8 +18,6 @@
 #include <fmt/core.h>
 #include <seastar/core/coroutine.hh>
 #include <seastar/coroutine/as_future.hh>
-
-#include <boost/range/adaptor/reversed.hpp>
 
 #include <fmt/ostream.h>
 
@@ -97,7 +95,7 @@ class read_context : public reader_lifecycle_policy_v2 {
             std::unique_ptr<const query::partition_slice> slice;
             utils::phased_barrier::operation read_operation;
             std::optional<reader_concurrency_semaphore::inactive_read_handle> handle;
-            std::optional<flat_mutation_reader_v2::tracked_buffer> buffer;
+            std::optional<mutation_reader::tracked_buffer> buffer;
 
             remote_parts(
                     reader_permit permit,
@@ -115,7 +113,7 @@ class read_context : public reader_lifecycle_policy_v2 {
 
         reader_state state = reader_state::inexistent;
         foreign_unique_ptr<remote_parts> rparts;
-        std::optional<flat_mutation_reader_v2::tracked_buffer> dismantled_buffer;
+        std::optional<mutation_reader::tracked_buffer> dismantled_buffer;
 
         reader_meta() = default;
 
@@ -127,7 +125,7 @@ class read_context : public reader_lifecycle_policy_v2 {
             }
         }
 
-        flat_mutation_reader_v2::tracked_buffer& get_dismantled_buffer(const reader_permit& permit) {
+        mutation_reader::tracked_buffer& get_dismantled_buffer(const reader_permit& permit) {
             if (!dismantled_buffer) {
                 dismantled_buffer.emplace(permit);
             }
@@ -195,7 +193,7 @@ class read_context : public reader_lifecycle_policy_v2 {
 
     static std::string_view reader_state_to_string(reader_state rs);
 
-    dismantle_buffer_stats dismantle_combined_buffer(flat_mutation_reader_v2::tracked_buffer combined_buffer, const dht::decorated_key& pkey);
+    dismantle_buffer_stats dismantle_combined_buffer(mutation_reader::tracked_buffer combined_buffer, const dht::decorated_key& pkey);
     dismantle_buffer_stats dismantle_compaction_state(detached_compaction_state compaction_state);
     future<> save_reader(shard_id shard, full_position_view last_pos);
 
@@ -247,7 +245,7 @@ public:
         return _cmd.max_result_size ? *_cmd.max_result_size : _db.local().get_query_max_result_size();
     }
 
-    virtual flat_mutation_reader_v2 create_reader(
+    virtual mutation_reader create_reader(
             schema_ptr schema,
             reader_permit permit,
             const dht::partition_range& pr,
@@ -283,13 +281,13 @@ public:
 
     future<> lookup_readers(db::timeout_clock::time_point timeout) noexcept;
 
-    future<> save_readers(flat_mutation_reader_v2::tracked_buffer unconsumed_buffer, std::optional<detached_compaction_state> compaction_state,
+    future<> save_readers(mutation_reader::tracked_buffer unconsumed_buffer, std::optional<detached_compaction_state> compaction_state,
             full_position last_pos) noexcept;
 
     future<> stop();
 };
 
-template <> struct fmt::formatter<read_context::dismantle_buffer_stats> : fmt::formatter<std::string_view> {
+template <> struct fmt::formatter<read_context::dismantle_buffer_stats> : fmt::formatter<string_view> {
     auto format(const read_context::dismantle_buffer_stats& s, fmt::format_context& ctx) const {
         return fmt::format_to(ctx.out(),
                               "kept {} partitions/{} fragments/{} bytes, discarded {} partitions/{} fragments/{} bytes",
@@ -318,7 +316,7 @@ std::string_view read_context::reader_state_to_string(reader_state rs) {
     return "invalid";
 }
 
-flat_mutation_reader_v2 read_context::create_reader(
+mutation_reader read_context::create_reader(
         schema_ptr schema,
         reader_permit permit,
         const dht::partition_range& pr,
@@ -329,7 +327,7 @@ flat_mutation_reader_v2 read_context::create_reader(
     auto& rm = _readers[shard];
 
     if (rm.state != reader_state::used && rm.state != reader_state::successful_lookup && rm.state != reader_state::inexistent) {
-        auto msg = format("Unexpected request to create reader for shard {}."
+        auto msg = seastar::format("Unexpected request to create reader for shard {}."
                 " The reader is expected to be in either `used`, `successful_lookup` or `inexistent` state,"
                 " but is in `{}` state instead.", shard, reader_state_to_string(rm.state));
         mmq_log.warn("{}", msg);
@@ -417,7 +415,7 @@ future<> read_context::stop() {
     });
 }
 
-read_context::dismantle_buffer_stats read_context::dismantle_combined_buffer(flat_mutation_reader_v2::tracked_buffer combined_buffer,
+read_context::dismantle_buffer_stats read_context::dismantle_combined_buffer(mutation_reader::tracked_buffer combined_buffer,
         const dht::decorated_key& pkey) {
     auto& sharder = _erm->get_sharder(*_schema);
 
@@ -428,7 +426,7 @@ read_context::dismantle_buffer_stats read_context::dismantle_combined_buffer(fla
     const auto rend = std::reverse_iterator(combined_buffer.begin());
     for (;rit != rend; ++rit) {
         if (rit->is_partition_start()) {
-            const auto shard = sharder.shard_of(rit->as_partition_start().key().token());
+            const auto shard = sharder.shard_for_reads(rit->as_partition_start().key().token());
 
             // It is possible that the reader this partition originates from
             // does not exist anymore. Either because we failed stopping it or
@@ -455,7 +453,7 @@ read_context::dismantle_buffer_stats read_context::dismantle_combined_buffer(fla
         }
     }
 
-    const auto shard = sharder.shard_of(pkey.token());
+    const auto shard = sharder.shard_for_reads(pkey.token());
     auto& shard_buffer = _readers[shard].get_dismantled_buffer(_permit);
     for (auto& smf : tmp_buffer) {
         stats.add(smf);
@@ -468,7 +466,7 @@ read_context::dismantle_buffer_stats read_context::dismantle_combined_buffer(fla
 read_context::dismantle_buffer_stats read_context::dismantle_compaction_state(detached_compaction_state compaction_state) {
     auto stats = dismantle_buffer_stats();
     auto& sharder = _erm->get_sharder(*_schema);
-    const auto shard = sharder.shard_of(compaction_state.partition_start.key().token());
+    const auto shard = sharder.shard_for_reads(compaction_state.partition_start.key().token());
 
     auto& rtc_opt = compaction_state.current_tombstone;
 
@@ -515,7 +513,7 @@ future<> read_context::save_reader(shard_id shard, full_position_view last_pos) 
             if (!reader_opt) {
                 return make_ready_future<>();
             }
-            flat_mutation_reader_v2_opt reader = std::move(*reader_opt);
+            mutation_reader_opt reader = std::move(*reader_opt);
 
             size_t fragments = 0;
             const auto size_before = reader->buffer_size();
@@ -603,7 +601,7 @@ future<> read_context::lookup_readers(db::timeout_clock::time_point timeout) noe
     }
 }
 
-future<> read_context::save_readers(flat_mutation_reader_v2::tracked_buffer unconsumed_buffer, std::optional<detached_compaction_state> compaction_state,
+future<> read_context::save_readers(mutation_reader::tracked_buffer unconsumed_buffer, std::optional<detached_compaction_state> compaction_state,
             full_position last_pos) noexcept {
     if (!_cmd.query_uuid) {
         co_return;
@@ -620,7 +618,7 @@ future<> read_context::save_readers(flat_mutation_reader_v2::tracked_buffer unco
         tracing::trace(_trace_state, "No compaction state to dismantle, partition exhausted", cs_stats);
     }
 
-    co_await parallel_for_each(boost::irange(0u, smp::count), [this, &last_pos] (shard_id shard) {
+    co_await parallel_for_each(std::views::iota(0u, smp::count), [this, &last_pos] (shard_id shard) {
         auto& rm = _readers[shard];
         if (rm.state == reader_state::successful_lookup || rm.state == reader_state::saving) {
             return save_reader(shard, last_pos);
@@ -636,10 +634,10 @@ template <typename ResultBuilder>
 requires std::is_nothrow_move_constructible_v<typename ResultBuilder::result_type>
 struct page_consume_result {
     typename ResultBuilder::result_type result;
-    flat_mutation_reader_v2::tracked_buffer unconsumed_fragments;
+    mutation_reader::tracked_buffer unconsumed_fragments;
     lw_shared_ptr<compact_for_query_state_v2> compaction_state;
 
-    page_consume_result(typename ResultBuilder::result_type&& result, flat_mutation_reader_v2::tracked_buffer&& unconsumed_fragments,
+    page_consume_result(typename ResultBuilder::result_type&& result, mutation_reader::tracked_buffer&& unconsumed_fragments,
             lw_shared_ptr<compact_for_query_state_v2>&& compaction_state) noexcept
         : result(std::move(result))
         , unconsumed_fragments(std::move(unconsumed_fragments))
@@ -657,13 +655,13 @@ struct page_consume_result {
 //   calling detach_buffer() after fill_buffer() is guranted to get all
 //   fragments fetched in that call, none will be left in the underlying
 //   reader's one.
-class multi_range_reader : public flat_mutation_reader_v2::impl {
-    flat_mutation_reader_v2 _reader;
+class multi_range_reader : public mutation_reader::impl {
+    mutation_reader _reader;
     dht::partition_range_vector::const_iterator _it;
     const dht::partition_range_vector::const_iterator _end;
 
 public:
-    multi_range_reader(schema_ptr s, reader_permit permit, flat_mutation_reader_v2 rd, const dht::partition_range_vector& ranges)
+    multi_range_reader(schema_ptr s, reader_permit permit, mutation_reader rd, const dht::partition_range_vector& ranges)
         : impl(std::move(s), std::move(permit)) , _reader(std::move(rd)) , _it(ranges.begin()) , _end(ranges.end()) { }
 
     virtual future<> fill_buffer() override {
@@ -724,7 +722,7 @@ future<page_consume_result<ResultBuilder>> read_page(
     auto reader = make_multishard_combining_reader_v2(ctx, s, ctx->erm(), ctx->permit(), ranges.front(), cmd.slice,
             trace_state, mutation_reader::forwarding(ranges.size() > 1));
     if (ranges.size() > 1) {
-        reader = make_flat_mutation_reader_v2<multi_range_reader>(s, ctx->permit(), std::move(reader), ranges);
+        reader = make_mutation_reader<multi_range_reader>(s, ctx->permit(), std::move(reader), ranges);
     }
 
     // Use coroutine::as_future to prevent exception on timesout.
@@ -986,31 +984,27 @@ public:
 
 future<std::tuple<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_temperature>> query_mutations_on_all_shards(
         distributed<replica::database>& db,
-        schema_ptr table_schema,
+        schema_ptr query_schema,
         const query::read_command& cmd,
         const dht::partition_range_vector& ranges,
         tracing::trace_state_ptr trace_state,
         db::timeout_clock::time_point timeout) {
-    schema_ptr query_schema = cmd.slice.is_reversed() ? table_schema->make_reversed() : table_schema;
-
     return do_query_on_all_shards<mutation_query_result_builder>(db, query_schema, cmd, ranges, std::move(trace_state), timeout,
-            [table_schema, &cmd] (query::result_memory_accounter&& accounter) {
-        return mutation_query_result_builder(*table_schema, cmd.slice, std::move(accounter));
+            [query_schema, &cmd] (query::result_memory_accounter&& accounter) {
+        return mutation_query_result_builder(*query_schema, cmd.slice, std::move(accounter));
     });
 }
 
 future<std::tuple<foreign_ptr<lw_shared_ptr<query::result>>, cache_temperature>> query_data_on_all_shards(
         distributed<replica::database>& db,
-        schema_ptr table_schema,
+        schema_ptr query_schema,
         const query::read_command& cmd,
         const dht::partition_range_vector& ranges,
         query::result_options opts,
         tracing::trace_state_ptr trace_state,
         db::timeout_clock::time_point timeout) {
-    schema_ptr query_schema = cmd.slice.is_reversed() ? table_schema->make_reversed() : table_schema;
-
     return do_query_on_all_shards<data_query_result_builder>(db, query_schema, cmd, ranges, std::move(trace_state), timeout,
-            [table_schema, &cmd, opts] (query::result_memory_accounter&& accounter) {
-        return data_query_result_builder(*table_schema, cmd.slice, opts, std::move(accounter), cmd.tombstone_limit);
+            [query_schema, &cmd, opts] (query::result_memory_accounter&& accounter) {
+        return data_query_result_builder(*query_schema, cmd.slice, opts, std::move(accounter), cmd.tombstone_limit);
     });
 }

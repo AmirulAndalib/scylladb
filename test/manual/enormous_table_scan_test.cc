@@ -3,10 +3,11 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 
+#include "utils/assert.hh"
 #include <boost/test/unit_test.hpp>
 #include <seastar/testing/test_case.hh>
 
@@ -15,17 +16,12 @@
 #include "test/lib/cql_assertions.hh"
 #include "transport/messages/result_message.hh"
 
-#include <boost/range/adaptor/indirected.hpp>
-#include <boost/range/adaptor/map.hpp>
-#include <boost/range/adaptor/transformed.hpp>
-#include <boost/range/algorithm/find_if.hpp>
-
 #include "dht/i_partitioner.hh"
 #include "mutation/mutation_fragment.hh"
 #include "schema/schema_builder.hh"
 #include "readers/forwardable_v2.hh"
 
-class enormous_table_reader final : public flat_mutation_reader_v2::impl {
+class enormous_table_reader final : public mutation_reader::impl {
 // Reader for a table with 4.5 billion rows, all with partition key 0 and an incrementing clustering key
 public:
     static constexpr uint64_t CLUSTERING_ROW_COUNT = 4500ULL * 1000ULL * 1000ULL;
@@ -52,7 +48,7 @@ public:
 
             auto ck_to_int = [] (const clustering_key& ck) -> int64_t {
                 auto exploded = ck.explode();
-                assert(exploded.size() == 1);
+                SCYLLA_ASSERT(exploded.size() == 1);
                 return value_cast<int64_t>(long_type->deserialize(exploded[0]));
             };
 
@@ -161,14 +157,14 @@ private:
 };
 
 struct enormous_virtual_reader {
-    flat_mutation_reader_v2 operator()(schema_ptr schema,
+    mutation_reader operator()(schema_ptr schema,
             reader_permit permit,
             const dht::partition_range& range,
             const query::partition_slice& slice,
             tracing::trace_state_ptr trace_state,
             streamed_mutation::forwarding fwd,
             mutation_reader::forwarding fwd_mr) {
-        auto reader = make_flat_mutation_reader_v2<enormous_table_reader>(schema, permit, range, slice);
+        auto reader = make_mutation_reader<enormous_table_reader>(schema, permit, range, slice);
         if (fwd == streamed_mutation::forwarding::yes) {
             return make_forwardable(std::move(reader));
         }

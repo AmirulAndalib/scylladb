@@ -1,11 +1,9 @@
 #
 # Copyright 2023-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
-import pytest
-import subprocess
 import itertools
 
 
@@ -15,11 +13,12 @@ def _do_check_nodetool_fails_with(
         nodetool_kwargs: dict,
         matcher):
 
-    with pytest.raises(subprocess.CalledProcessError) as e:
-        nodetool(*nodetool_args, **nodetool_kwargs)
+    res = nodetool(*nodetool_args, **nodetool_kwargs, check_return_code=False)
 
-    err_lines = e.value.stderr.rstrip().split('\n')
-    out_lines = e.value.stdout.rstrip().split('\n')
+    assert res.returncode != 0
+
+    err_lines = res.stderr.rstrip().split('\n')
+    out_lines = res.stdout.rstrip().split('\n')
 
     matcher(out_lines, err_lines)
 

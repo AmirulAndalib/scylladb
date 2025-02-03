@@ -1,12 +1,13 @@
 #
 # Copyright 2023-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
 import aiohttp
 import aiohttp.web
 import asyncio
+import contextlib
 import collections
 import json
 import logging
@@ -42,11 +43,12 @@ class expected_request:
     ONE = 0  # exactly one request is allowed
     MULTIPLE = 1  # one or more request is allowed
 
-    def __init__(self, method: str, path: str, params: dict = {}, multiple: int = ONE,
+    def __init__(self, method: str, path: str, params: dict = {}, body: Any = None, multiple: int = ONE,
                  response: Dict[str, Any] = None, response_status: int = 200, hit: int = 0):
         self.method = method
         self.path = path.rstrip("/")
         self.params = params
+        self.body = body
         self.multiple = multiple
         self.response = response
         self.response_status = response_status
@@ -64,12 +66,13 @@ class expected_request:
                 "path": self.path,
                 "multiple": self.multiple,
                 "params": {k: param_to_json(v) for k, v in self.params.items()},
+                "body": self.body,
                 "response": self.response,
                 "response_status": self.response_status,
                 "hit": self.hit}
 
     def __eq__(self, o):
-        return self.method == o.method and self.path == o.path and self.params == o.params
+        return self.method == o.method and self.path == o.path and self.params == o.params and self.body == o.body
 
     def __str__(self):
         return json.dumps(self.as_json())
@@ -94,6 +97,7 @@ def _make_expected_request(req_json):
             req_json["method"],
             req_json["path"],
             params={k: _make_param_value(v) for k, v in req_json.get("params", dict()).items()},
+            body=req_json.get("body"),
             multiple=req_json.get("multiple", expected_request.ONE),
             response=req_json.get("response"),
             response_status=req_json.get("response_status", 200),
@@ -102,9 +106,11 @@ def _make_expected_request(req_json):
 
 class rest_server():
     EXPECTED_REQUESTS_PATH = "__expected_requests__"
+    UNEXPECTED_REQUESTS_PATH = "__unexpected_requests__"
 
     def __init__(self):
         self.expected_requests = collections.defaultdict(list)
+        self.unexpected_requests = 0
 
     @staticmethod
     def _request_key(method, path):
@@ -112,6 +118,9 @@ class rest_server():
 
     async def get_expected_requests(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
         return aiohttp.web.json_response([r.as_json() for rl in self.expected_requests.values() for r in rl])
+
+    async def get_unexpected_requests(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        return aiohttp.web.json_response(self.unexpected_requests)
 
     async def post_expected_requests(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
         payload = await request.json()
@@ -122,6 +131,7 @@ class rest_server():
 
     async def delete_expected_requests(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
         self.expected_requests.clear()
+        self.unexpected_requests = 0
         return aiohttp.web.json_response({})
 
     async def handle_generic_request(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
@@ -130,11 +140,18 @@ class rest_server():
         try:
             expected_requests = self.expected_requests[request_key]
         except KeyError:
+            self.unexpected_requests += 1
             return aiohttp.web.Response(status=404, text=f"Request {request_key} not found in expected requests")
 
-        this_req = expected_request(request.method, request.path, params=dict(request.query))
+        body = None
+        if request.can_read_body:
+            # only JSON-encoded payload is supported
+            body = await request.json()
+
+        this_req = expected_request(request.method, request.path, params=dict(request.query), body=body)
 
         if len(expected_requests) == 0:
+            self.unexpected_requests += 1
             logger.error(f"unexpected request, expected no request, got {this_req}")
             return aiohttp.web.Response(status=500, text=f"Expected no requests, got {this_req}")
 
@@ -148,6 +165,7 @@ class rest_server():
 
         if expected_req is None:
             reqs = '\n'.join([str(r) for r in expected_requests])
+            self.unexpected_requests += 1
             logger.error(f"unexpected request, request {this_req} matches none of the expected requests:\n{reqs}")
             return aiohttp.web.Response(status=500, text=f"Request {this_req} doesn't match any expected request")
 
@@ -195,6 +213,7 @@ async def run_server(ip, port):
         aiohttp.web.get(f"/{server.EXPECTED_REQUESTS_PATH}", wrap_handler(server.get_expected_requests)),
         aiohttp.web.post(f"/{server.EXPECTED_REQUESTS_PATH}", wrap_handler(server.post_expected_requests)),
         aiohttp.web.delete(f"/{server.EXPECTED_REQUESTS_PATH}", wrap_handler(server.delete_expected_requests)),
+        aiohttp.web.get(f"/{server.UNEXPECTED_REQUESTS_PATH}", wrap_handler(server.get_unexpected_requests)),
         # Register all required rest API paths.
         # Unfortunately, we have to register here all the different routes, used by tests.
         # Fortunately, aiohttp supports variable paths and with that, there is not that many paths to register.
@@ -221,6 +240,8 @@ async def run_server(ip, port):
         aiohttp.web.route("*", "/stream_manager/", wrap_handler(server.handle_generic_request)),
         aiohttp.web.route("*", "/system/{part1}", wrap_handler(server.handle_generic_request)),
         aiohttp.web.route("*", "/system/{part1}/{part2}", wrap_handler(server.handle_generic_request)),
+        aiohttp.web.route("*", "/task_manager/{part1}", wrap_handler(server.handle_generic_request)),
+        aiohttp.web.route("*", "/task_manager/{part1}/{part2}", wrap_handler(server.handle_generic_request)),
     ])
 
     logger.info("start serving")
@@ -260,6 +281,19 @@ def get_expected_requests(server):
         raise
 
 
+def get_unexpected_requests(server):
+    """Get the number of unexpeced requests from the server.
+
+    Any requests which didn't match an expected request is unexpected.
+    The amount of such requests is stored in a counter.
+    This counter is reset when clear_expected_requests() is called.
+    """
+    ip, port = server
+    r = requests.get(f"http://{ip}:{port}/{rest_server.UNEXPECTED_REQUESTS_PATH}")
+    r.raise_for_status()
+    return r.json()
+
+
 def clear_expected_requests(server):
     """Clear the expected requests list on the server.
 
@@ -282,6 +316,16 @@ def set_expected_requests(server, expected_requests):
     payload = json.dumps([r.as_json() for r in expected_requests])
     r = requests.post(f"http://{ip}:{port}/{rest_server.EXPECTED_REQUESTS_PATH}", data=payload)
     r.raise_for_status()
+
+
+@contextlib.contextmanager
+def expected_requests_manager(server, expected_requests):
+    clear_expected_requests(server)
+    set_expected_requests(server, expected_requests)
+    try:
+        yield
+    finally:
+        clear_expected_requests(server)
 
 
 if __name__ == '__main__':

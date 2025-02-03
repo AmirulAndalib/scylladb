@@ -3,12 +3,13 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 #pragma once
 
 #include <seastar/core/condition-variable.hh>
 #include <seastar/core/on_internal_error.hh>
+#include "utils/assert.hh"
 #include "utils/small_vector.hh"
 #include "raft.hh"
 #include "tracker.hh"
@@ -23,9 +24,7 @@ struct fsm_output {
         bool is_local;
 
         // Always 0 for non-local snapshots.
-        size_t max_trailing_entries;
-
-        // FIXME: include max_trailing_bytes here and in store_snapshot_descriptor
+        size_t preserved_log_entries;
     };
     std::optional<std::pair<term_t, server_id>> term_and_vote;
     std::vector<log_entry_ptr> log_entries;
@@ -314,7 +313,7 @@ private:
 
     // Issue the next read identifier
     read_id next_read_id() {
-        assert(is_leader());
+        SCYLLA_ASSERT(is_leader());
         ++leader_state().last_read_id;
         leader_state().last_read_id_changed = true;
         _sm_events.signal();
@@ -356,8 +355,20 @@ public:
     bool is_candidate() const {
         return std::holds_alternative<candidate>(_state);
     }
+    std::string_view current_state() const {
+        static constexpr std::string_view leader_state = "Leader";
+        static constexpr std::string_view follower_state = "Follower";
+        static constexpr std::string_view candidate_state = "Candidate";
+        if (is_leader()) {
+            return leader_state;
+        }
+        return is_follower() ? follower_state : candidate_state;
+    }
     bool is_prevote_candidate() const {
         return is_candidate() && std::get<candidate>(_state).is_prevote;
+    }
+    size_t state_to_metric() const {
+        return _state.index();
     }
     index_t log_last_idx() const {
         return _log.last_idx();
@@ -396,7 +407,7 @@ public:
 
     // Ask to search for a leader if one is not known.
     void ping_leader() {
-        assert(!current_leader());
+        SCYLLA_ASSERT(!current_leader());
         _ping_leader = true;
     }
 
@@ -637,7 +648,9 @@ void fsm::step(server_id from, Message&& msg) {
             _last_election_time = _clock.now();
 
             if (current_leader() != from) {
-                on_internal_error_noexcept(logger, "Got append request/install snapshot/read_quorum from an unexpected leader");
+                on_internal_error_noexcept(logger, format(
+                    "Got append request/install snapshot/read_quorum from an unexpected leader,"
+                    " expected leader: {}, message from: {}", current_leader(), from));
             }
         }
     }

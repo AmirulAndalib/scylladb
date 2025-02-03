@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "auth/common.hh"
@@ -16,6 +16,7 @@
 #include "mutation/canonical_mutation.hh"
 #include "schema/schema_fwd.hh"
 #include "timestamp.hh"
+#include "utils/assert.hh"
 #include "utils/exponential_backoff_retry.hh"
 #include "cql3/query_processor.hh"
 #include "cql3/statements/create_table_statement.hh"
@@ -23,9 +24,8 @@
 #include "service/migration_manager.hh"
 #include "service/raft/group0_state_machine.hh"
 #include "timeout_config.hh"
-#include "db/config.hh"
-#include "db/system_auth_keyspace.hh"
 #include "utils/error_injection.hh"
+#include "db/system_keyspace.hh"
 
 namespace auth {
 
@@ -41,16 +41,14 @@ constinit const std::string_view AUTH_PACKAGE_NAME("org.apache.cassandra.auth.")
 static logging::logger auth_log("auth");
 
 bool legacy_mode(cql3::query_processor& qp) {
-    return !qp.db().get_config().check_experimental(
-        db::experimental_features_t::feature::CONSISTENT_TOPOLOGY_CHANGES) ||
-        qp.auth_version <= db::system_auth_keyspace::version_t::v1;
+    return qp.auth_version < db::auth_version_t::v2;
 }
 
 std::string_view get_auth_ks_name(cql3::query_processor& qp) {
     if (legacy_mode(qp)) {
         return meta::legacy::AUTH_KS;
     }
-    return db::system_auth_keyspace::NAME;
+    return db::system_keyspace::NAME;
 }
 
 // Func must support being invoked more than once.
@@ -67,15 +65,15 @@ future<> do_after_system_ready(seastar::abort_source& as, seastar::noncopyable_f
     }).discard_result();
 }
 
-static future<> create_metadata_table_if_missing_impl(
+static future<> create_legacy_metadata_table_if_missing_impl(
         std::string_view table_name,
         cql3::query_processor& qp,
         std::string_view cql,
         ::service::migration_manager& mm) {
-    assert(this_shard_id() == 0); // once_among_shards makes sure a function is executed on shard 0 only
+    SCYLLA_ASSERT(this_shard_id() == 0); // once_among_shards makes sure a function is executed on shard 0 only
 
     auto db = qp.db();
-    auto parsed_statement = cql3::query_processor::parse_statement(cql);
+    auto parsed_statement = cql3::query_processor::parse_statement(cql, cql3::dialect{});
     auto& parsed_cf_statement = static_cast<cql3::statements::raw::cf_statement&>(*parsed_statement);
 
     parsed_cf_statement.prepare_keyspace(meta::legacy::AUTH_KS);
@@ -100,12 +98,12 @@ static future<> create_metadata_table_if_missing_impl(
     }
 }
 
-future<> create_metadata_table_if_missing(
+future<> create_legacy_metadata_table_if_missing(
         std::string_view table_name,
         cql3::query_processor& qp,
         std::string_view cql,
         ::service::migration_manager& mm) noexcept {
-    return futurize_invoke(create_metadata_table_if_missing_impl, table_name, qp, cql, mm);
+    return futurize_invoke(create_legacy_metadata_table_if_missing_impl, table_name, qp, cql, mm);
 }
 
 ::service::query_state& internal_distributed_query_state() noexcept {
@@ -125,7 +123,8 @@ static future<> announce_mutations_with_guard(
         ::service::raft_group0_client& group0_client,
         std::vector<canonical_mutation> muts,
         ::service::group0_guard group0_guard,
-        seastar::abort_source* as) {
+        seastar::abort_source& as,
+        std::optional<::service::raft_timeout> timeout) {
     auto group0_cmd = group0_client.prepare_command(
         ::service::write_mutations{
             .mutations{std::move(muts)},
@@ -133,14 +132,15 @@ static future<> announce_mutations_with_guard(
         group0_guard,
         "auth: modify internal data"
     );
-    return group0_client.add_entry(std::move(group0_cmd), std::move(group0_guard), as);
+    return group0_client.add_entry(std::move(group0_cmd), std::move(group0_guard), as, timeout);
 }
 
 future<> announce_mutations_with_batching(
         ::service::raft_group0_client& group0_client,
         start_operation_func_t start_operation_func,
-        std::function<mutations_generator(api::timestamp_type& t)> gen,
-        seastar::abort_source* as) {
+        std::function<::service::mutations_generator(api::timestamp_type t)> gen,
+        seastar::abort_source& as,
+        std::optional<::service::raft_timeout> timeout) {
     // account for command's overhead, it's better to use smaller threshold than constantly bounce off the limit
     size_t memory_threshold = group0_client.max_command_size() * 0.75;
     utils::get_local_injector().inject("auth_announce_mutations_command_max_size",
@@ -170,7 +170,7 @@ future<> announce_mutations_with_batching(
                 group0_guard = co_await start_operation_func(as);
                 timestamp = group0_guard->write_timestamp();
             }
-            co_await announce_mutations_with_guard(group0_client, std::move(muts), std::move(*group0_guard), as);
+            co_await announce_mutations_with_guard(group0_client, std::move(muts), std::move(*group0_guard), as, timeout);
             group0_guard = std::nullopt;
             memory_usage = 0;
             muts = {};
@@ -181,7 +181,7 @@ future<> announce_mutations_with_batching(
             group0_guard = co_await start_operation_func(as);
             timestamp = group0_guard->write_timestamp();
         }
-        co_await announce_mutations_with_guard(group0_client, std::move(muts), std::move(*group0_guard), as);
+        co_await announce_mutations_with_guard(group0_client, std::move(muts), std::move(*group0_guard), as, timeout);
     }
 }
 
@@ -190,8 +190,9 @@ future<> announce_mutations(
         ::service::raft_group0_client& group0_client,
         const sstring query_string,
         std::vector<data_value_or_unset> values,
-        seastar::abort_source* as) {
-    auto group0_guard = co_await group0_client.start_operation(as);
+        seastar::abort_source& as,
+        std::optional<::service::raft_timeout> timeout) {
+    auto group0_guard = co_await group0_client.start_operation(as, timeout);
     auto timestamp = group0_guard.write_timestamp();
     auto muts = co_await qp.get_mutations_internal(
             query_string,
@@ -199,7 +200,20 @@ future<> announce_mutations(
             timestamp,
             std::move(values));
     std::vector<canonical_mutation> cmuts = {muts.begin(), muts.end()};
-    co_await announce_mutations_with_guard(group0_client, std::move(cmuts), std::move(group0_guard), as);
+    co_await announce_mutations_with_guard(group0_client, std::move(cmuts), std::move(group0_guard), as, timeout);
+}
+
+future<> collect_mutations(
+        cql3::query_processor& qp,
+        ::service::group0_batch& collector,
+        const sstring query_string,
+        std::vector<data_value_or_unset> values) {
+    auto muts = co_await qp.get_mutations_internal(
+            query_string,
+            internal_distributed_query_state(),
+            collector.write_timestamp(),
+            std::move(values));
+    collector.add_mutations(std::move(muts), format("auth internal statement: {}", query_string));
 }
 
 }

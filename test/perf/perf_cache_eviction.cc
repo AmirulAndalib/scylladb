@@ -3,10 +3,11 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <boost/range/irange.hpp>
+#include <fmt/ranges.h>
 #include "seastarx.hh"
 #include "test/lib/simple_schema.hh"
 #include "test/lib/cql_test_env.hh"

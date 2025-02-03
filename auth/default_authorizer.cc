@@ -5,18 +5,17 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include "auth/default_authorizer.hh"
-#include "db/system_auth_keyspace.hh"
+#include "db/system_keyspace.hh"
 
 extern "C" {
 #include <crypt.h>
 #include <unistd.h>
 }
 
-#include <boost/algorithm/string/join.hpp>
 #include <boost/range.hpp>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/sleep.hh>
@@ -27,7 +26,7 @@ extern "C" {
 #include "cql3/query_processor.hh"
 #include "cql3/untyped_result_set.hh"
 #include "exceptions/exceptions.hh"
-#include "log.hh"
+#include "utils/log.hh"
 #include "utils/class_registrator.hh"
 
 namespace auth {
@@ -53,7 +52,6 @@ static const class_registrator<
 
 default_authorizer::default_authorizer(cql3::query_processor& qp, ::service::raft_group0_client& g0, ::service::migration_manager& mm)
         : _qp(qp)
-        , _group0_client(g0)
         , _migration_manager(mm) {
 }
 
@@ -67,7 +65,7 @@ bool default_authorizer::legacy_metadata_exists() const {
 }
 
 future<bool> default_authorizer::legacy_any_granted() const {
-    static const sstring query = format("SELECT * FROM {}.{} LIMIT 1", meta::legacy::AUTH_KS, PERMISSIONS_CF);
+    static const sstring query = seastar::format("SELECT * FROM {}.{} LIMIT 1", meta::legacy::AUTH_KS, PERMISSIONS_CF);
 
     return _qp.execute_internal(
             query,
@@ -80,7 +78,7 @@ future<bool> default_authorizer::legacy_any_granted() const {
 
 future<> default_authorizer::migrate_legacy_metadata() {
     alogger.info("Starting migration of legacy permissions metadata.");
-    static const sstring query = format("SELECT * FROM {}.{}", meta::legacy::AUTH_KS, legacy_table_name);
+    static const sstring query = seastar::format("SELECT * FROM {}.{}", meta::legacy::AUTH_KS, legacy_table_name);
 
     return _qp.execute_internal(
             query,
@@ -90,9 +88,10 @@ future<> default_authorizer::migrate_legacy_metadata() {
             return do_with(
                     row.get_as<sstring>("username"),
                     parse_resource(row.get_as<sstring>(RESOURCE_NAME)),
-                    [this, &row](const auto& username, const auto& r) {
+                    ::service::group0_batch::unused(),
+                    [this, &row](const auto& username, const auto& r, auto& mc) {
                 const permission_set perms = permissions::from_strings(row.get_set<sstring>(PERMISSIONS_NAME));
-                return grant(username, perms, r);
+                return grant(username, perms, r, mc);
             });
         }).finally([results] {});
     }).then([] {
@@ -103,7 +102,7 @@ future<> default_authorizer::migrate_legacy_metadata() {
     });
 }
 
-future<> default_authorizer::start() {
+future<> default_authorizer::start_legacy() {
     static const sstring create_table = fmt::format(
             "CREATE TABLE {}.{} ("
             "{} text,"
@@ -121,7 +120,7 @@ future<> default_authorizer::start() {
             90 * 24 * 60 * 60); // 3 months.
 
     return once_among_shards([this] {
-        return create_metadata_table_if_missing(
+        return create_legacy_metadata_table_if_missing(
                 PERMISSIONS_CF,
                 _qp,
                 create_table,
@@ -144,6 +143,13 @@ future<> default_authorizer::start() {
     });
 }
 
+future<> default_authorizer::start() {
+    if (legacy_mode(_qp)) {
+        return start_legacy();
+    }
+    return make_ready_future<>();
+}
+
 future<> default_authorizer::stop() {
     _as.request_abort();
     return _finished.handle_exception_type([](const sleep_aborted&) {}).handle_exception_type([](const abort_requested_exception&) {});
@@ -155,7 +161,7 @@ default_authorizer::authorize(const role_or_anonymous& maybe_role, const resourc
         co_return permissions::NONE;
     }
 
-    const sstring query = format("SELECT {} FROM {}.{} WHERE {} = ? AND {} = ?",
+    const sstring query = seastar::format("SELECT {} FROM {}.{} WHERE {} = ? AND {} = ?",
             PERMISSIONS_NAME,
             get_auth_ks_name(_qp),
             PERMISSIONS_CF,
@@ -178,8 +184,9 @@ default_authorizer::modify(
         std::string_view role_name,
         permission_set set,
         const resource& resource,
-        std::string_view op) {
-    const sstring query = format("UPDATE {}.{} SET {} = {} {} ? WHERE {} = ? AND {} = ?",
+        std::string_view op,
+        ::service::group0_batch& mc) {
+    const sstring query = seastar::format("UPDATE {}.{} SET {} = {} {} ? WHERE {} = ? AND {} = ?",
             get_auth_ks_name(_qp),
             PERMISSIONS_CF,
             PERMISSIONS_NAME,
@@ -195,21 +202,21 @@ default_authorizer::modify(
                 {permissions::to_strings(set), sstring(role_name), resource.name()},
                 cql3::query_processor::cache_internal::no).discard_result();
     }
-    co_return co_await announce_mutations(_qp, _group0_client, query,
-        {permissions::to_strings(set), sstring(role_name), resource.name()}, &_as);
+    co_await collect_mutations(_qp, mc, query,
+            {permissions::to_strings(set), sstring(role_name), resource.name()});
 }
 
 
-future<> default_authorizer::grant(std::string_view role_name, permission_set set, const resource& resource) {
-    return modify(role_name, std::move(set), resource, "+");
+future<> default_authorizer::grant(std::string_view role_name, permission_set set, const resource& resource, ::service::group0_batch& mc) {
+    return modify(role_name, std::move(set), resource, "+", mc);
 }
 
-future<> default_authorizer::revoke(std::string_view role_name, permission_set set, const resource& resource) {
-    return modify(role_name, std::move(set), resource, "-");
+future<> default_authorizer::revoke(std::string_view role_name, permission_set set, const resource& resource, ::service::group0_batch& mc) {
+    return modify(role_name, std::move(set), resource, "-", mc);
 }
 
 future<std::vector<permission_details>> default_authorizer::list_all() const {
-    const sstring query = format("SELECT {}, {}, {} FROM {}.{}",
+    const sstring query = seastar::format("SELECT {}, {}, {} FROM {}.{}",
             ROLE_NAME,
             RESOURCE_NAME,
             PERMISSIONS_NAME,
@@ -235,9 +242,9 @@ future<std::vector<permission_details>> default_authorizer::list_all() const {
     co_return all_details;
 }
 
-future<> default_authorizer::revoke_all(std::string_view role_name) {
+future<> default_authorizer::revoke_all(std::string_view role_name, ::service::group0_batch& mc) {
     try {
-        const sstring query = format("DELETE FROM {}.{} WHERE {} = ?",
+        const sstring query = seastar::format("DELETE FROM {}.{} WHERE {} = ?",
                 get_auth_ks_name(_qp),
                 PERMISSIONS_CF,
                 ROLE_NAME);
@@ -249,7 +256,7 @@ future<> default_authorizer::revoke_all(std::string_view role_name) {
                     {sstring(role_name)},
                     cql3::query_processor::cache_internal::no).discard_result();
         } else {
-            co_await announce_mutations(_qp, _group0_client, query, {sstring(role_name)}, &_as);
+            co_await collect_mutations(_qp, mc, query, {sstring(role_name)});
         }
     } catch (exceptions::request_execution_exception& e) {
         alogger.warn("CassandraAuthorizer failed to revoke all permissions of {}: {}", role_name, e);
@@ -257,7 +264,7 @@ future<> default_authorizer::revoke_all(std::string_view role_name) {
 }
 
 future<> default_authorizer::revoke_all_legacy(const resource& resource) {
-    static const sstring query = format("SELECT {} FROM {}.{} WHERE {} = ? ALLOW FILTERING",
+    static const sstring query = seastar::format("SELECT {} FROM {}.{} WHERE {} = ? ALLOW FILTERING",
             ROLE_NAME,
             get_auth_ks_name(_qp),
             PERMISSIONS_CF,
@@ -274,7 +281,7 @@ future<> default_authorizer::revoke_all_legacy(const resource& resource) {
                     res->begin(),
                     res->end(),
                     [this, res, resource](const cql3::untyped_result_set::row& r) {
-                static const sstring query = format("DELETE FROM {}.{} WHERE {} = ? AND {} = ?",
+                static const sstring query = seastar::format("DELETE FROM {}.{} WHERE {} = ? AND {} = ?",
                         get_auth_ks_name(_qp),
                         PERMISSIONS_CF,
                         ROLE_NAME,
@@ -301,49 +308,88 @@ future<> default_authorizer::revoke_all_legacy(const resource& resource) {
     });
 }
 
-future<> default_authorizer::revoke_all(const resource& resource) {
+future<> default_authorizer::revoke_all(const resource& resource, ::service::group0_batch& mc) {
     if (legacy_mode(_qp)) {
         co_return co_await revoke_all_legacy(resource);
     }
+
+    if (resource.kind() == resource_kind::data &&
+            data_resource_view(resource).is_keyspace()) {
+        revoke_all_keyspace_resources(resource, mc);
+        co_return;
+    }
+
     auto name = resource.name();
-    try {
-        auto gen = [this, name] (api::timestamp_type& t) -> mutations_generator {
-            const sstring query = format("SELECT {} FROM {}.{} WHERE {} = ? ALLOW FILTERING",
-                    ROLE_NAME,
+    auto gen = [this, name] (api::timestamp_type t) -> ::service::mutations_generator {
+        const sstring query = seastar::format("SELECT {} FROM {}.{} WHERE {} = ? ALLOW FILTERING",
+                ROLE_NAME,
+                get_auth_ks_name(_qp),
+                PERMISSIONS_CF,
+                RESOURCE_NAME);
+        auto res = co_await _qp.execute_internal(
+                query,
+                db::consistency_level::LOCAL_ONE,
+                {name},
+                cql3::query_processor::cache_internal::no);
+        for (const auto& r : *res) {
+            const sstring query = seastar::format("DELETE FROM {}.{} WHERE {} = ? AND {} = ?",
                     get_auth_ks_name(_qp),
                     PERMISSIONS_CF,
+                    ROLE_NAME,
                     RESOURCE_NAME);
-            auto res = co_await _qp.execute_internal(
+            auto muts = co_await _qp.get_mutations_internal(
                     query,
-                    db::consistency_level::LOCAL_ONE,
-                    {name},
-                    cql3::query_processor::cache_internal::no);
-            for (const auto& r : *res) {
-                const sstring query = format("DELETE FROM {}.{} WHERE {} = ? AND {} = ?",
-                        get_auth_ks_name(_qp),
-                        PERMISSIONS_CF,
-                        ROLE_NAME,
-                        RESOURCE_NAME);
-                auto muts = co_await _qp.get_mutations_internal(
-                        query,
-                        internal_distributed_query_state(),
-                        t,
-                        {r.get_as<sstring>(ROLE_NAME), name});
-                if (muts.size() != 1) {
-                    on_internal_error(alogger,
-                        format("expecting single delete mutation, got {}", muts.size()));
-                }
-                co_yield std::move(muts[0]);
+                    internal_distributed_query_state(),
+                    t,
+                    {r.get_as<sstring>(ROLE_NAME), name});
+            if (muts.size() != 1) {
+                on_internal_error(alogger,
+                    seastar::format("expecting single delete mutation, got {}", muts.size()));
             }
-        };
-        co_await announce_mutations_with_batching(
-                _group0_client,
-                std::bind_front(&::service::raft_group0_client::start_operation, &_group0_client),
-                std::move(gen),
-                &_as);
-    } catch (exceptions::request_execution_exception& e) {
-        alogger.warn("CassandraAuthorizer failed to revoke all permissions on {}: {}", name, e);
-    }
+            co_yield std::move(muts[0]);
+        }
+    };
+    mc.add_generator(std::move(gen), "default_authorizer::revoke_all");
+}
+
+void default_authorizer::revoke_all_keyspace_resources(const resource& ks_resource, ::service::group0_batch& mc) {
+    auto ks_name = ks_resource.name();
+    auto gen = [this, ks_name] (api::timestamp_type t) -> ::service::mutations_generator {
+        const sstring query = seastar::format("SELECT {}, {} FROM {}.{}",
+                ROLE_NAME,
+                RESOURCE_NAME,
+                get_auth_ks_name(_qp),
+                PERMISSIONS_CF);
+        auto res = co_await _qp.execute_internal(
+                query,
+                db::consistency_level::LOCAL_ONE,
+                {},
+                cql3::query_processor::cache_internal::no);
+        auto ks_prefix = ks_name + "/";
+        for (const auto& r : *res) {
+            auto name = r.get_as<sstring>(RESOURCE_NAME);
+            if (name != ks_name && !name.starts_with(ks_prefix)) {
+                // r doesn't represent resource related to ks_resource
+                continue;
+            }
+            const sstring query = seastar::format("DELETE FROM {}.{} WHERE {} = ? AND {} = ?",
+                    get_auth_ks_name(_qp),
+                    PERMISSIONS_CF,
+                    ROLE_NAME,
+                    RESOURCE_NAME);
+            auto muts = co_await _qp.get_mutations_internal(
+                    query,
+                    internal_distributed_query_state(),
+                    t,
+                    {r.get_as<sstring>(ROLE_NAME), name});
+            if (muts.size() != 1) {
+                on_internal_error(alogger,
+                    format("expecting single delete mutation, got {}", muts.size()));
+            }
+            co_yield std::move(muts[0]);
+        }
+    };
+    mc.add_generator(std::move(gen), "default_authorizer::revoke_all_keyspace_resources");
 }
 
 const resource_set& default_authorizer::protected_resources() const {

@@ -3,15 +3,16 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-#include <boost/type.hpp>
+#include <type_traits>
 #include <random>
 #include <unordered_set>
 #include <algorithm>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/coroutine.hh>
+#include <seastar/coroutine/maybe_yield.hh>
 
 #include "gms/endpoint_state.hh"
 #include "gms/versioned_value.hh"
@@ -26,8 +27,10 @@
 #include "gms/inet_address.hh"
 #include "gms/gossiper.hh"
 #include "gms/feature_service.hh"
+#include "utils/assert.hh"
 #include "utils/error_injection.hh"
 #include "utils/UUID_gen.hh"
+#include "utils/to_string.hh"
 
 #include "cdc/generation.hh"
 #include "cdc/cdc_options.hh"
@@ -106,8 +109,8 @@ stream_id::stream_id(dht::token token, size_t vnode_index)
     copy_int_to_bytes(dht::token::to_int64(token), 0, _value);
     copy_int_to_bytes(low_qword, sizeof(int64_t), _value);
     // not a hot code path. make sure we did not mess up the shifts and masks.
-    assert(version() == version_1);
-    assert(index() == vnode_index);
+    SCYLLA_ASSERT(version() == version_1);
+    SCYLLA_ASSERT(index() == vnode_index);
 }
 
 stream_id::stream_id(bytes b)
@@ -125,7 +128,7 @@ bool stream_id::is_set() const {
 }
 
 static int64_t bytes_to_int64(bytes_view b, size_t offset) {
-    assert(b.size() >= offset + sizeof(int64_t));
+    SCYLLA_ASSERT(b.size() >= offset + sizeof(int64_t));
     int64_t res;
     std::copy_n(b.begin() + offset, sizeof(int64_t), reinterpret_cast<int8_t *>(&res));
     return net::ntoh(res);
@@ -183,7 +186,7 @@ static std::vector<stream_id> create_stream_ids(
         size_t index, dht::token start, dht::token end, size_t shard_count, uint8_t ignore_msb) {
     std::vector<stream_id> result;
     result.reserve(shard_count);
-    dht::sharder sharder(shard_count, ignore_msb);
+    dht::static_sharder sharder(shard_count, ignore_msb);
     for (size_t shard_idx = 0; shard_idx < shard_count; ++shard_idx) {
         auto t = dht::find_first_token_for_shard(sharder, start, end, shard_idx);
         // compose the id from token and the "index" of the range end owning vnode
@@ -194,10 +197,9 @@ static std::vector<stream_id> create_stream_ids(
     return result;
 }
 
-bool should_propose_first_generation(const gms::inet_address& me, const gms::gossiper& g) {
-    auto my_host_id = g.get_host_id(me);
-    return g.for_each_endpoint_state_until([&] (const gms::inet_address& node, const gms::endpoint_state& eps) {
-        return stop_iteration(my_host_id < g.get_host_id(node));
+bool should_propose_first_generation(const locator::host_id& my_host_id, const gms::gossiper& g) {
+    return g.for_each_endpoint_state_until([&] (const gms::inet_address&, const gms::endpoint_state& eps) {
+        return stop_iteration(my_host_id < eps.get_host_id());
     }) == stop_iteration::no;
 }
 
@@ -400,7 +402,7 @@ future<cdc::generation_id> generation_service::legacy_make_new_generation(const 
                 throw std::runtime_error(
                         format("Can't find endpoint for token {}", end));
             }
-            const auto ep = tmptr->get_endpoint_for_host_id(*endpoint);
+            const auto ep = _gossiper.get_address_map().get(*endpoint);
             auto sc = get_shard_count(ep, _gossiper);
             return {sc > 0 ? sc : 1, get_sharding_ignore_msb(ep, _gossiper)};
         }
@@ -411,7 +413,7 @@ future<cdc::generation_id> generation_service::legacy_make_new_generation(const 
 
     // Our caller should ensure that there are normal tokens in the token ring.
     auto normal_token_owners = tmptr->count_normal_token_owners();
-    assert(normal_token_owners);
+    SCYLLA_ASSERT(normal_token_owners);
 
     if (_feature_service.cdc_generations_v2) {
         cdc_log.info("Inserting new generation data at UUID {}", uuid);
@@ -473,16 +475,21 @@ static std::optional<cdc::generation_id> get_generation_id_for(const gms::inet_a
 
 static future<std::optional<cdc::topology_description>> retrieve_generation_data_v2(
         cdc::generation_id_v2 id,
-        bool raft_experimental_topology,
         db::system_keyspace& sys_ks,
         db::system_distributed_keyspace& sys_dist_ks) {
     auto cdc_gen = co_await sys_dist_ks.read_cdc_generation(id.id);
 
-    if (raft_experimental_topology && !cdc_gen) {
+    if (!cdc_gen && id.id.is_timestamp()) {
         // If we entered legacy mode due to recovery, we (or some other node)
         // might gossip about a generation that was previously propagated
         // through raft. If that's the case, it will sit in
         // the system.cdc_generations_v3 table.
+        //
+        // If the provided id is not a timeuuid, we don't want to query
+        // the system.cdc_generations_v3 table. This table stores generation
+        // ids as timeuuids. If the provided id is not a timeuuid, the
+        // generation cannot be in system.cdc_generations_v3. Also, the query
+        // would fail with a marshaling error.
         cdc_gen = co_await sys_ks.read_cdc_generation_opt(id.id);
     }
 
@@ -491,7 +498,6 @@ static future<std::optional<cdc::topology_description>> retrieve_generation_data
 
 static future<std::optional<cdc::topology_description>> retrieve_generation_data(
         cdc::generation_id gen_id,
-        bool raft_experimental_topology,
         db::system_keyspace& sys_ks,
         db::system_distributed_keyspace& sys_dist_ks,
         db::system_distributed_keyspace::context ctx) {
@@ -500,14 +506,13 @@ static future<std::optional<cdc::topology_description>> retrieve_generation_data
         return sys_dist_ks.read_cdc_topology_description(id, ctx);
     },
     [&] (const cdc::generation_id_v2& id) {
-        return retrieve_generation_data_v2(id, raft_experimental_topology, sys_ks, sys_dist_ks);
+        return retrieve_generation_data_v2(id, sys_ks, sys_dist_ks);
     }
     ), gen_id);
 }
 
 static future<> do_update_streams_description(
         cdc::generation_id gen_id,
-        bool raft_experimental_topology,
         db::system_keyspace& sys_ks,
         db::system_distributed_keyspace& sys_dist_ks,
         db::system_distributed_keyspace::context ctx) {
@@ -518,7 +523,7 @@ static future<> do_update_streams_description(
 
     // We might race with another node also inserting the description, but that's ok. It's an idempotent operation.
 
-    auto topo = co_await retrieve_generation_data(gen_id, raft_experimental_topology, sys_ks, sys_dist_ks, ctx);
+    auto topo = co_await retrieve_generation_data(gen_id, sys_ks, sys_dist_ks, ctx);
     if (!topo) {
         throw no_generation_data_exception(gen_id);
     }
@@ -537,13 +542,12 @@ static future<> do_update_streams_description(
  */
 static future<> update_streams_description(
         cdc::generation_id gen_id,
-        bool raft_experimental_topology,
         db::system_keyspace& sys_ks,
         shared_ptr<db::system_distributed_keyspace> sys_dist_ks,
         noncopyable_function<unsigned()> get_num_token_owners,
         abort_source& abort_src) {
     try {
-        co_await do_update_streams_description(gen_id, raft_experimental_topology, sys_ks, *sys_dist_ks, { get_num_token_owners() });
+        co_await do_update_streams_description(gen_id, sys_ks, *sys_dist_ks, { get_num_token_owners() });
     } catch (...) {
         cdc_log.warn(
             "Could not update CDC description table with generation {}: {}. Will retry in the background.",
@@ -551,7 +555,6 @@ static future<> update_streams_description(
 
         // It is safe to discard this future: we keep system distributed keyspace alive.
         (void)(([] (cdc::generation_id gen_id,
-                    bool raft_experimental_topology,
                     db::system_keyspace& sys_ks,
                     shared_ptr<db::system_distributed_keyspace> sys_dist_ks,
                     noncopyable_function<unsigned()> get_num_token_owners,
@@ -564,7 +567,7 @@ static future<> update_streams_description(
                     co_return;
                 }
                 try {
-                    co_await do_update_streams_description(gen_id, raft_experimental_topology, sys_ks, *sys_dist_ks, { get_num_token_owners() });
+                    co_await do_update_streams_description(gen_id, sys_ks, *sys_dist_ks, { get_num_token_owners() });
                     co_return;
                 } catch (...) {
                     cdc_log.warn(
@@ -572,7 +575,7 @@ static future<> update_streams_description(
                         gen_id, std::current_exception());
                 }
             }
-        })(gen_id, raft_experimental_topology, sys_ks, std::move(sys_dist_ks), std::move(get_num_token_owners), abort_src));
+        })(gen_id, sys_ks, std::move(sys_dist_ks), std::move(get_num_token_owners), abort_src));
     }
 }
 
@@ -610,7 +613,6 @@ struct time_and_ttl {
  */
 static future<std::optional<cdc::generation_id_v1>> rewrite_streams_descriptions(
         std::vector<time_and_ttl> times_and_ttls,
-        bool raft_experimental_topology,
         db::system_keyspace& sys_ks,
         shared_ptr<db::system_distributed_keyspace> sys_dist_ks,
         noncopyable_function<unsigned()> get_num_token_owners,
@@ -655,7 +657,7 @@ static future<std::optional<cdc::generation_id_v1>> rewrite_streams_descriptions
     co_await max_concurrent_for_each(first, tss.end(), 10, [&] (db_clock::time_point ts) -> future<> {
         while (true) {
             try {
-                co_return co_await do_update_streams_description(cdc::generation_id_v1{ts}, raft_experimental_topology, sys_ks, *sys_dist_ks, { get_num_token_owners() });
+                co_return co_await do_update_streams_description(cdc::generation_id_v1{ts}, sys_ks, *sys_dist_ks, { get_num_token_owners() });
             } catch (const no_generation_data_exception& e) {
                 cdc_log.error("Failed to rewrite streams for generation {}: {}. Giving up.", ts, e);
                 each_success = false;
@@ -731,7 +733,6 @@ future<> generation_service::maybe_rewrite_streams_descriptions() {
     cdc_log.info("Rewriting stream tables in the background...");
     auto last_rewritten = co_await rewrite_streams_descriptions(
             std::move(times_and_ttls),
-            _cfg.raft_experimental_topology,
             _sys_ks.local(),
             _sys_dist_ks.local_shared(),
             std::move(get_num_token_owners),
@@ -812,7 +813,7 @@ future<> generation_service::stop() {
 }
 
 generation_service::~generation_service() {
-    assert(_stopped);
+    SCYLLA_ASSERT(_stopped);
 }
 
 future<> generation_service::after_join(std::optional<cdc::generation_id>&& startup_gen_id) {
@@ -872,7 +873,7 @@ future<> generation_service::check_and_repair_cdc_streams() {
             return;
         }
         if (!_gossiper.is_normal(addr)) {
-            throw std::runtime_error(format("All nodes must be in NORMAL or LEFT state while performing check_and_repair_cdc_streams"
+            throw std::runtime_error(fmt::format("All nodes must be in NORMAL or LEFT state while performing check_and_repair_cdc_streams"
                     " ({} is in state {})", addr, _gossiper.get_gossip_status(state)));
         }
 
@@ -907,7 +908,7 @@ future<> generation_service::check_and_repair_cdc_streams() {
 
         std::optional<topology_description> gen;
         try {
-            gen = co_await retrieve_generation_data(*latest, _cfg.raft_experimental_topology, _sys_ks.local(), *sys_dist_ks, { tmptr->count_normal_token_owners() });
+            gen = co_await retrieve_generation_data(*latest, _sys_ks.local(), *sys_dist_ks, { tmptr->count_normal_token_owners() });
         } catch (exceptions::request_timeout_exception& e) {
             cdc_log.error("{}: \"{}\". {}.", timeout_msg, e.what(), exception_translating_msg);
             throw exceptions::request_execution_exception(exceptions::exception_code::READ_TIMEOUT,
@@ -963,10 +964,10 @@ future<> generation_service::check_and_repair_cdc_streams() {
     // Update _gen_id first, so that legacy_do_handle_cdc_generation (which will get called due to the status update)
     // won't try to update the gossiper, which would result in a deadlock inside add_local_application_state
     _gen_id = new_gen_id;
-    co_await _gossiper.add_local_application_state({
-            { gms::application_state::CDC_GENERATION_ID, gms::versioned_value::cdc_generation_id(new_gen_id) },
-            { gms::application_state::STATUS, *status }
-    });
+    co_await _gossiper.add_local_application_state(
+            std::pair(gms::application_state::CDC_GENERATION_ID, gms::versioned_value::cdc_generation_id(new_gen_id)),
+            std::pair(gms::application_state::STATUS, *status)
+    );
     co_await _sys_ks.local().update_cdc_generation_id(new_gen_id);
 }
 
@@ -1023,7 +1024,7 @@ future<> generation_service::legacy_handle_cdc_generation(std::optional<cdc::gen
 
     if (using_this_gen) {
         cdc_log.info("Starting to use generation {}", *gen_id);
-        co_await update_streams_description(*gen_id, _cfg.raft_experimental_topology, _sys_ks.local(), get_sys_dist_ks(),
+        co_await update_streams_description(*gen_id, _sys_ks.local(), get_sys_dist_ks(),
                 [tmptr = _token_metadata.get()] { return tmptr->count_normal_token_owners(); },
                 _abort_src);
     }
@@ -1040,7 +1041,7 @@ void generation_service::legacy_async_handle_cdc_generation(cdc::generation_id g
                 bool using_this_gen = co_await svc->legacy_do_handle_cdc_generation_intercept_nonfatal_errors(gen_id);
                 if (using_this_gen) {
                     cdc_log.info("Starting to use generation {}", gen_id);
-                    co_await update_streams_description(gen_id, svc->_cfg.raft_experimental_topology, svc->_sys_ks.local(), svc->get_sys_dist_ks(),
+                    co_await update_streams_description(gen_id, svc->_sys_ks.local(), svc->get_sys_dist_ks(),
                             [tmptr = svc->_token_metadata.get()] { return tmptr->count_normal_token_owners(); },
                             svc->_abort_src);
                 }
@@ -1109,9 +1110,11 @@ future<bool> generation_service::legacy_do_handle_cdc_generation(cdc::generation
     assert_shard_zero(__PRETTY_FUNCTION__);
 
     auto sys_dist_ks = get_sys_dist_ks();
-    auto gen = co_await retrieve_generation_data(gen_id, _cfg.raft_experimental_topology, _sys_ks.local(), *sys_dist_ks, { _token_metadata.get()->count_normal_token_owners() });
+    auto gen = co_await retrieve_generation_data(gen_id, _sys_ks.local(), *sys_dist_ks, { _token_metadata.get()->count_normal_token_owners() });
     if (!gen) {
-        throw std::runtime_error(format(
+        // This may happen during raft upgrade when a node gossips about a generation that
+        // was propagated through raft and we didn't apply it yet.
+        throw generation_handling_nonfatal_exception(fmt::format(
             "Could not find CDC generation {} in distributed system tables (current time: {}),"
             " even though some node gossiped about it.",
             gen_id, db_clock::now()));

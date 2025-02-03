@@ -107,12 +107,6 @@ For example:
    WITH replication = {'class': 'NetworkTopologyStrategy', 'DC1' : 1, 'DC2' : 3}
    AND durable_writes = true;
 
-.. TODO Add a link to the description of minimum_keyspace_rf when the ScyllaDB options section is added to the docs.
-
-You can configure the minimum acceptable replication factor using the ``minimum_keyspace_rf`` option. 
-Attempting to create a keyspace with a replication factor lower than the value set with 
-``minimum_keyspace_rf`` will return an error (the default value is 0). 
-
 The supported ``options`` are:
 
 =================== ========== =========== ========= ===================================================================
@@ -122,12 +116,12 @@ name                 kind       mandatory   default   description
                                                       details below).
 ``durable_writes``   *simple*   no          true      Whether to use the commit log for updates on this keyspace
                                                       (disable this option at your own risk!).
-``tablets``          *map*      no                    Experimental - enables tablets for this keyspace (see :ref:`tablets<tablets>`)
+``tablets``          *map*      no                    Enables or disables tablets for the keyspace (see :ref:`tablets <tablets>`)
 =================== ========== =========== ========= ===================================================================
 
 The ``replication`` property is mandatory and must at least contains the ``'class'`` sub-option, which defines the
 replication strategy class to use. The rest of the sub-options depend on what replication
-strategy is used. By default, Scylla supports the following ``'class'``:
+strategy is used. By default, ScyllaDB supports the following ``'class'``:
 
 .. _replication-strategy:
 
@@ -142,7 +136,12 @@ query latency. For a production ready strategy, see *NetworkTopologyStrategy* . 
 ========================= ====== ======= =============================================
 sub-option                 type   since   description
 ========================= ====== ======= =============================================
-``'replication_factor'``   int    all     The number of replicas to store per range
+``'replication_factor'``   int    all     The number of replicas to store per range.
+
+                                          The replication factor should be equal to
+                                          or lower than the number of nodes.
+                                          Configuring a higher RF may prevent
+                                          creating tables in that keyspace. 
 ========================= ====== ======= =============================================
 
 .. note:: Using NetworkTopologyStrategy is recommended. Using SimpleStrategy will make it harder to add Data Center in the future.
@@ -166,6 +165,11 @@ sub-option                             type  description
                                              definitions or explicit datacenter settings.
                                              For example, to have three replicas per
                                              datacenter, supply this with a value of 3.
+
+                                             The replication factor configured for a DC
+                                             should be equal to or lower than the number
+                                             of nodes in that DC. Configuring a higher RF 
+                                             may prevent creating tables in that keyspace. 
 ===================================== ====== =============================================
 
 Note that when ``ALTER`` ing keyspaces and supplying ``replication_factor``,
@@ -198,54 +202,39 @@ An example that excludes a datacenter while using ``replication_factor``::
 
     DESCRIBE KEYSPACE excalibur
         CREATE KEYSPACE excalibur WITH replication = {'class': 'NetworkTopologyStrategy', 'DC1': '3'} AND durable_writes = true;
-
-
-
-.. only:: opensource
   
-  Keyspace storage options :label-caution:`Experimental`
-  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Keyspace storage options :label-caution:`Experimental`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-  By default, SStables of a keyspace are stored locally.
-  As an alternative, you can configure your keyspace to be stored
-  on Amazon S3 or another S3-compatible object store.
-  See :ref:`Keyspace storage options <keyspace-storage-options>` for details.
+By default, SStables of a keyspace are stored locally.
+As an alternative, you can configure your keyspace to be stored
+on Amazon S3 or another S3-compatible object store.
+See :ref:`Keyspace storage options <admin-keyspace-storage-options>` for details.
 
 .. _tablets:
 
-The ``tablets`` property :label-caution:`Experimental`
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The ``tablets`` property
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The ``tablets`` property is used to make keyspace replication tablets-based.
-It is only valid when ``experimental_features: tablets`` is specified in ``scylla.yaml`` (which
-in turn requires ``consistent_cluster_management: true``); it must be a power of two.
+The ``tablets`` property enables or disables tablets-based distribution
+for a keyspace. 
 
 Options:
 
 ===================================== ====== =============================================
 sub-option                             type  description
 ===================================== ====== =============================================
-``'enabled'``                          bool  Whether or not to enable tablets for keyspace
+``'enabled'``                          bool  Whether or not to enable tablets for a keyspace
 ``'initial'``                          int   The number of tablets to start with
 ===================================== ====== =============================================
 
-By default if tablets cluster feature is enabled, any keyspace will be created with tablets
-enabled. The ``tablets`` option is used to opt-out a keyspace from tablets replication.
+.. scylladb_include_flag:: tablets-default.rst
 
 A good rule of thumb to calculate initial tablets is to divide the expected total storage used
 by tables in this keyspace by (``replication_factor`` * 5GB). For example, if you expect a 30TB
 table and have a replication factor of 3, divide 30TB by (3*5GB) for a result of 2000. Since the
 value must be a power of two, round up to 2048.
-
-.. note::
-   The calculation applies to every table in the keyspace independently; so it can only realistically be
-   used for a keyspace containing a single table. It is expected that per-table controls will be available
-   in the future.
-
-.. caution::
-   The ``initial`` option may change its definition or be completely removed as it is part
-   of an experimental feature.
-
+The calculation applies to every table in the keyspace.
 
 An example that creates a keyspace with 2048 tablets per table::
 
@@ -256,6 +245,9 @@ An example that creates a keyspace with 2048 tablets per table::
     } AND tablets = {
         'initial': 2048
     };
+
+
+See :doc:`Data Distribution with Tablets </architecture/tablets>` for more information about tablets.
 
 .. _use-statement:        
         
@@ -288,6 +280,17 @@ For instance::
 
 
 The supported options are the same as :ref:`creating a keyspace <create-keyspace-statement>`.
+
+ALTER KEYSPACE with Tablets :label-caution:`Experimental`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Modifying a keyspace with tablets enabled is possible and doesn't require any special CQL syntax. However, there are some limitations:
+
+- The replication factor (RF) can be increased or decreased by at most 1 at a time. To reach the desired RF value, modify the RF repeatedly.
+- The ``ALTER`` statement rejects the ``replication_factor`` tag. List the DCs explicitly when altering a keyspace. See :ref:`NetworkTopologyStrategy <replication-strategy>`.
+- If there's any other ongoing global topology operation, executing the ``ALTER`` statement will fail (with an explicit and specific error) and needs to be repeated.
+- The ``ALTER`` statement may take longer than the regular query timeout, and even if it times out, it will continue to execute in the background.
+- The replication strategy cannot be modified, as keyspaces with tablets only support ``NetworkTopologyStrategy``.
 
 .. _drop-keyspace-statement:
 
@@ -352,8 +355,7 @@ For instance::
         common_name text,
         population varint,
         average_size int
-    ) WITH comment='Important biological records'
-       AND read_repair_chance = 1.0;
+    ) WITH comment='Important biological records';
 
     CREATE TABLE timeline (
         userid uuid,
@@ -536,7 +538,7 @@ Another useful property of a partition is that when writing data, all the update
 done *atomically* and in *isolation*, which is not the case across partitions.
 
 The proper choice of the partition key and clustering columns for a table is probably one of the most important aspects
-of data modeling in Scylla. It largely impacts which queries can be performed and how efficient they are.
+of data modeling in ScyllaDB. It largely impacts which queries can be performed and how efficient they are.
 
 .. note:: An empty string is *not* allowed as a partition key value. In a compound partition key (multiple partition-key columns), any or all of them may be empty strings. Empty string is *not* a Null value.
 
@@ -547,7 +549,7 @@ The clustering columns
 ``````````````````````
 
 The clustering columns of a table define the clustering order for the partition of that table. For a given
-:ref:`partition <partition-key>`, all the rows are physically ordered inside Scylla by that clustering order. For
+:ref:`partition <partition-key>`, all the rows are physically ordered inside ScyllaDB by that clustering order. For
 instance, given::
 
     CREATE TABLE t (
@@ -590,6 +592,11 @@ options of a table are described in the following sections.
 
 Compact tables
 ``````````````
+
+Support for compact tables has been deprecated.
+By default, new tables cannot be created with the ``COMPACT STORAGE`` option, but existing tables continue to work as before.
+To allow creating new COMPACT STORAGE tables, set the ``enable_create_table_with_compact_storage`` option to ``true`` in ``scylla.yaml``,
+yet beware that support for compact tables is planned to be permanently removed in a future version.
 
 ..
    .. caution:: Since Apache Cassandra 3.0, compact tables have the exact same layout internally than non compact ones (for the
@@ -658,14 +665,6 @@ A table supports the following options:
      - simple
      - none
      - A free-form, human-readable comment.
-   * - ``read_repair_chance``
-     - simple
-     - 0
-     - The probability that extra nodes are queried (e.g. more nodes than required by the consistency level) for the purpose of read repairs.
-   * - ``dclocal_read_repair_chance``
-     - simple
-     - 0
-     - The probability that extra nodes are queried (e.g. more nodes than required by the consistency level) belonging to the same data center as the read coordinator for the purpose of read repairs.
    * - ``speculative_retry``
      - simple
      - 99PERCENTILE
@@ -686,6 +685,18 @@ A table supports the following options:
      - simple
      - 0
      - The default expiration time (“TTL”) in seconds for a table.
+   * - ``memtable_flush_period_in_ms``
+     - simple
+     - 0
+     - Flush the memtables associated with this table every ``memtable_flush_period_in_ms`` milliseconds. When set to ``0``, periodic flush is disabled. Cannot set to values lower than ``60000`` (1 minute). Default: ``0``.
+   * - ``min_index_interval``
+     - simple
+     - 128
+     - Minimum gap between summary entries: ScyllaDB will create summary entries with at least this amount of partitions between them. Controls the maximums density of the summary.
+   * - ``max_index_interval``
+     - simple
+     - 2048
+     - Not implemented (option value is ignored).
    * - ``compaction``
      - map
      - see below
@@ -709,7 +720,7 @@ A table supports the following options:
 Speculative retry options
 #########################
 
-By default, Scylla read coordinators only query as many replicas as necessary to satisfy
+By default, ScyllaDB read coordinators only query as many replicas as necessary to satisfy
 consistency levels: one for consistency level ``ONE``, a quorum for ``QUORUM``, and so on.
 ``speculative_retry`` determines when coordinators may query additional replicas, which is useful
 when replicas are slow or unresponsive.  The following are legal values (case-insensitive):
@@ -746,7 +757,7 @@ Custom strategy can be provided by specifying the full class name as a :ref:`str
 <constants>`.
 
 All default strategies support a number of common options, as well as options specific to
-the strategy chosen (see the section corresponding to your strategy for details: :ref:`STCS <stcs-options>`, :ref:`LCS <lcs-options>`, and :ref:`TWCS <twcs-options>`).
+the strategy chosen (see the section corresponding to your strategy for details: :ref:`STCS <stcs-options>`, :ref:`LCS <lcs-options>`, :ref:`ICS <ics-options>`, and :ref:`TWCS <twcs-options>`).
 
 .. _cql-compression-options:
 
@@ -759,22 +770,16 @@ available:
 ========================= =============== =============================================================================
  Option                    Default         Description
 ========================= =============== =============================================================================
- ``sstable_compression``   LZ4Compressor   The compression algorithm to use. Default compressors are
-                                           LZ4Compressor, SnappyCompressor, and DeflateCompressor.
-                                           A custom compressor can be provided by specifying the full class
-                                           name as a “string constant”:#constants.
+ ``sstable_compression``   LZ4Compressor   The compression algorithm to use. Available compressors are
+                                           LZ4Compressor, SnappyCompressor, DeflateCompressor, and ZstdCompressor.
  ``chunk_length_in_kb``    4               On disk SSTables are compressed by block (to allow random reads). This
                                            defines the size (in KB) of the block. Bigger values may improve the
                                            compression rate, but increases the minimum size of data to be read from disk
                                            for a read. Allowed values are powers of two between 1 and 128.
+ ``crc_check_chance``      1.0             Not implemented (option value is ignored).
 ========================= =============== =============================================================================
 
-.. ``crc_check_chance``      1.0             When compression is enabled, each compressed block includes a checksum of
-..                                           that block for the purpose of detecting disk bitrot and avoiding the
-..                                           propagation of corruption to other replicas. This option defines the
-..                                           probability with which those checksums are checked during read. By default
-..                                           they are always checked. Set to 0 to disable checksum checking and to 0.5 for
-..                                           instance to check them every other read   |
+.. crc_check_chance was promoted to a top-level table option since Cassandra 3.0, but we didn't do this.
 
 For example, to enable compression:
 
@@ -862,7 +867,8 @@ time may result in the resurrection of deleted data.
 
 The ``tombstone_gc`` option allows you to prevent data resurrection. With the ``repair`` mode configured, :term:`tombstone` 
 are only removed after :term:`repair` is performed. Unlike  ``gc_grace_seconds``, ``tombstone_gc`` has no time constraints - when 
-the ``repair`` mode is on, tombstones garbage collection will wait until repair is run. 
+the ``repair`` mode is on, tombstones garbage collection will wait until repair is run. For tables which use tablets ``repair``
+mode is set by default.
 
 You can enable the after-repair tombstone GC by setting the ``repair`` mode using 
 ``ALTER TABLE`` or ``CREATE TABLE``. For example:
@@ -921,8 +927,8 @@ Altering an existing table uses the ``ALTER TABLE`` statement:
 
    alter_table_statement: ALTER TABLE `table_name` `alter_table_instruction`
    alter_table_instruction: ADD `column_name` `cql_type` ( ',' `column_name` `cql_type` )*
-                          : | DROP `column_name`
-                          : | DROP '(' `column_name` ( ',' `column_name` )* ')'
+                          : | DROP `column_name` [ USING TIMESTAMP `timestamp` ]
+                          : | DROP '(' `column_name` ( ',' `column_name` )* ')' [ USING TIMESTAMP `timestamp` ]
                           : | ALTER `column_name` TYPE `cql_type`
                           : | WITH `options`
                           : | scylla_encryption_options: '=' '{'[`cipher_algorithm` : <hash>]','[`secret_key_strength` : <len>]','[`key_provider`: <provider>]'}'
@@ -934,8 +940,7 @@ For instance:
     ALTER TABLE addamsFamily ADD gravesite varchar;
 
     ALTER TABLE addamsFamily
-           WITH comment = 'A most excellent and useful table'
-           AND read_repair_chance = 0.2;
+           WITH comment = 'A most excellent and useful table';
 
 
     ALTER TABLE data_atrest (
@@ -972,11 +977,24 @@ The ``ALTER TABLE`` statement can:
 
 .. warning:: Dropping a column assumes that the timestamps used for the value of this column are "real" timestamp in
    microseconds. Using "real" timestamps in microseconds is the default is and is **strongly** recommended, but as
-   Scylla allows the client to provide any timestamp on any table, it is theoretically possible to use another
+   ScyllaDB allows the client to provide any timestamp on any table, it is theoretically possible to use another
    convention. Please be aware that if you do so, dropping a column will not work correctly.
 
 .. warning:: Once a column is dropped, it is allowed to re-add a column with the same name as the dropped one
    **unless** the type of the dropped column was a (non-frozen) column (due to an internal technical limitation).
+
+It is also possible to drop a column with specified timestamp ``ALTER TABLE ... DROP ... USING TIMESTAMP ...``.
+The purpose of this statement is to be able to safely restore schema (see :doc:`Backup and Restore Procedures </operating-scylla/procedures/backup-restore/index>`) in the case a column was dropped and re-added later.
+The timestamp should be obtained by describing schema with internals ``DESC SCHEMA WITH INTERNALS`` (or other descriptions like ``DESC TABLE ks.cf WITH INTERNALS``)
+
+For example: 
+Let's say you have a table with some data. Then you drop one of the column and re-add it later.
+In the future, when you wish to restore the schema, you **have to** also drop the column with specified timestamp (the same timestamp as the original drop)
+and re-add it again.
+Otherwise, you can resurrect your data (if you skip ``ALTER ... DROP/ADD ...`` entirely) 
+or you can lose data inserted after column re-addition (if you drop the column without the timestamp).
+
+.. warning:: Dropping a column with specified timestamp should only be used to restore schema from description (``DESCRIBE SCHEMA WITH INTERNALS``).
 
 .. _drop-table-statement:
 

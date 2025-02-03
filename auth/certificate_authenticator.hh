@@ -4,13 +4,13 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
-#include <boost/regex.hpp>
 #include "auth/authenticator.hh"
+#include <boost/regex_fwd.hpp>  // IWYU pragma: keep
 
 namespace cql3 {
 
@@ -47,9 +47,9 @@ public:
     future<authenticated_user> authenticate(const credentials_map& credentials) const override;
     future<std::optional<authenticated_user>> authenticate(session_dn_func) const override;
 
-    future<> create(std::string_view role_name, const authentication_options& options) override;
-    future<> alter(std::string_view role_name, const authentication_options& options) override;
-    future<> drop(std::string_view role_name) override;
+    future<> create(std::string_view role_name, const authentication_options& options, ::service::group0_batch& mc) override;
+    future<> alter(std::string_view role_name, const authentication_options& options, ::service::group0_batch&) override;
+    future<> drop(std::string_view role_name, ::service::group0_batch&) override;
 
     future<custom_options> query_custom_options(std::string_view role_name) const override;
 

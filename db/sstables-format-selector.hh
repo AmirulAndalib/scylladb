@@ -4,7 +4,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
@@ -47,7 +47,7 @@ public:
 class sstables_format_selector {
     sharded<replica::database>& _db;
     db::system_keyspace* _sys_ks = nullptr;
-    sstables::sstable_version_types _selected_format = sstables::sstable_version_types::mc;
+    sstables::sstable_version_types _selected_format = sstables::sstable_version_types::me;
     future<> select_format(sstables::sstable_version_types new_format);
     future<> read_sstables_format();
 public:

@@ -5,7 +5,7 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #pragma once
@@ -26,11 +26,16 @@ public:
     bool depends_on(std::string_view ks_name, std::optional<std::string_view> cf_name) const override;
 
     future<> check_access(query_processor& qp, const service::client_state& state) const override;
+protected:
+    virtual audit::statement_category category() const override;
+    virtual audit::audit_info_ptr audit_info() const override {
+        return audit::audit::create_audit_info(category(), sstring(), sstring());
+    }
 };
 
 class authentication_altering_statement : public authentication_statement {
 public:
-     virtual bool needs_guard(query_processor& qp) const override;
+     virtual bool needs_guard(query_processor& qp, service::query_state& state) const override;
 };
 
 }

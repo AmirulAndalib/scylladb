@@ -1,6 +1,6 @@
 # Copyright 2021-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 
 # This file configures pytest for all tests in this directory, and also
 # defines common test fixtures for all of them to use. A "fixture" is some
@@ -18,9 +18,8 @@ from cassandra.auth import PlainTextAuthProvider
 from cassandra.cluster import Cluster, ConsistencyLevel, ExecutionProfile, EXEC_PROFILE_DEFAULT
 from cassandra.policies import RoundRobinPolicy
 
-# Use the util.py library from ../cql-pytest:
-sys.path.insert(1, sys.path[0] + '/../cql-pytest')
-from util import unique_name, new_test_keyspace, keyspace_has_tablets, is_scylla
+
+from ..cqlpy.util import unique_name, new_test_keyspace, keyspace_has_tablets, is_scylla
 
 # By default, tests run against a Scylla server listening
 # on localhost:9042 for CQL and localhost:10000 for the REST API.

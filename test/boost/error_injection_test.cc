@@ -3,20 +3,24 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include <seastar/testing/on_internal_error.hh>
 #include "test/lib/cql_test_env.hh"
 #include <seastar/core/manual_clock.hh>
-#include "test/lib/scylla_test_case.hh"
+#undef SEASTAR_TESTING_MAIN
+#include <seastar/testing/test_case.hh>
 #include <seastar/rpc/rpc_types.hh>
 #include "utils/error_injection.hh"
 #include "db/timeout_clock.hh"
 #include "test/lib/cql_assertions.hh"
+#include "test/lib/test_utils.hh"
 #include "types/list.hh"
-#include "log.hh"
+#include "utils/log.hh"
 #include <chrono>
+
+BOOST_AUTO_TEST_SUITE(error_injection_test)
 
 using namespace std::literals::chrono_literals;
 
@@ -27,14 +31,6 @@ using minutes = std::chrono::minutes;
 using steady_clock = std::chrono::steady_clock;
 
 constexpr milliseconds sleep_msec(10); // Injection time sleep 10 msec
-
-namespace std::chrono {
-template<class Clock, class Duration>
-std::ostream& boost_test_print_type(std::ostream& os, const std::chrono::time_point<Clock, Duration>& time_point) {
-    fmt::print(os, "{}", time_point);
-    return os;
-}
-}
 
 SEASTAR_TEST_CASE(test_inject_noop) {
     utils::error_injection<false> errinj;
@@ -128,23 +124,6 @@ SEASTAR_TEST_CASE(test_inject_sleep_deadline_manual_clock) {
         auto deadline = seastar::manual_clock::now() + sleep_msec;
         errinj.enable("future_deadline");
         auto f = errinj.inject("future_deadline", deadline).then([deadline] {
-            BOOST_REQUIRE_GE(seastar::manual_clock::now() - deadline,
-                             seastar::manual_clock::duration::zero());
-            return make_ready_future<>();
-        });
-        manual_clock::advance(sleep_msec);
-        f.get();
-    });
-}
-
-SEASTAR_TEST_CASE(test_inject_sleep_deadline_manual_clock_lambda) {
-    return do_with_cql_env_thread([] (cql_test_env& e) {
-        utils::error_injection<true> errinj;
-
-        // Inject sleep, deadline short-circuit
-        auto deadline = seastar::manual_clock::now() + sleep_msec;
-        errinj.enable("future_deadline");
-        auto f = errinj.inject("future_deadline", deadline, [deadline] {
             BOOST_REQUIRE_GE(seastar::manual_clock::now() - deadline,
                              seastar::manual_clock::duration::zero());
             return make_ready_future<>();
@@ -344,6 +323,102 @@ SEASTAR_TEST_CASE(test_inject_message) {
     }
 }
 
+SEASTAR_TEST_CASE(test_inject_unshared_message) {
+    testing::scoped_no_abort_on_internal_error abort_guard;
+    utils::error_injection<true> errinj;
+
+    auto timeout = db::timeout_clock::now() + 5s;
+
+    errinj.enable("injection1");
+    {
+        // Test receiving enough unshared messages
+        auto f1 = errinj.inject("injection1", std::bind_front([] (auto timeout, auto& handler) -> future<> {
+            co_await handler.wait_for_message(timeout);
+            co_await handler.wait_for_message(timeout);
+        }, timeout), false);
+        auto f2 = errinj.inject("injection1", std::bind_front([] (auto timeout, auto& handler) -> future<> {
+            co_await handler.wait_for_message(timeout);
+            co_await handler.wait_for_message(timeout);
+        }, timeout), false);
+
+        for (size_t i = 0; i < 4; ++i) {
+            errinj.receive_message("injection1");
+        }
+
+        BOOST_REQUIRE_NO_THROW(co_await std::move(f1));
+        BOOST_REQUIRE_NO_THROW(co_await std::move(f2));
+    }
+    errinj.disable("injection1");
+
+    errinj.enable("injection2");
+    {
+        // Test receiving enough unshared messages before waiting for them
+        errinj.receive_message("injection2");
+        errinj.receive_message("injection2");
+
+        auto f1 = errinj.inject("injection2", [timeout] (auto& handler) {
+            return handler.wait_for_message(timeout);
+        }, false);
+        auto f2 = errinj.inject("injection2", [timeout] (auto& handler) {
+            return handler.wait_for_message(timeout);
+        }, false);
+
+        BOOST_REQUIRE_NO_THROW(co_await std::move(f1));
+        BOOST_REQUIRE_NO_THROW(co_await std::move(f2));
+    }
+    errinj.disable("injection2");
+
+    errinj.enable("injection3");
+    {
+        // Test receiving not enough unshared messages
+        auto timeout_1s = db::timeout_clock::now() + 1s;
+
+        auto f1 = errinj.inject("injection3", std::bind_front([] (auto timeout, auto& handler) -> future<> {
+            co_await handler.wait_for_message(timeout);
+            co_await handler.wait_for_message(timeout);
+        }, timeout_1s), false);
+        auto f2 = errinj.inject("injection3", std::bind_front([] (auto timeout, auto& handler) -> future<> {
+            co_await handler.wait_for_message(timeout);
+            co_await handler.wait_for_message(timeout);
+        }, timeout_1s), false);
+
+        for (size_t i = 0; i < 3; ++i) {
+            errinj.receive_message("injection3");
+        }
+
+        BOOST_REQUIRE_THROW(co_await when_all_succeed(std::move(f1), std::move(f2)).discard_result(), std::runtime_error);
+    }
+    errinj.disable("injection3");
+
+    errinj.enable("injection4");
+    {
+        // Test handlers sharing messages are independent of the not sharing ones
+        auto f1 = errinj.inject("injection4", std::bind_front([] (auto timeout, auto& handler) -> future<> {
+            co_await handler.wait_for_message(timeout);
+            co_await handler.wait_for_message(timeout);
+        }, timeout), true);
+        auto f2 = errinj.inject("injection4", std::bind_front([] (auto timeout, auto& handler) -> future<> {
+            co_await handler.wait_for_message(timeout);
+            co_await handler.wait_for_message(timeout);
+        }, timeout), true);
+        auto f3 = errinj.inject("injection4", [timeout] (auto& handler) {
+            return handler.wait_for_message(timeout);
+        }, false);
+        auto f4 = errinj.inject("injection4", [timeout] (auto& handler) {
+            return handler.wait_for_message(timeout);
+        }, false);
+
+        errinj.receive_message("injection4");
+        errinj.receive_message("injection4");
+
+        BOOST_REQUIRE_NO_THROW(co_await std::move(f1));
+        BOOST_REQUIRE_NO_THROW(co_await std::move(f2));
+        BOOST_REQUIRE_NO_THROW(co_await std::move(f3));
+        BOOST_REQUIRE_NO_THROW(co_await std::move(f4));
+    }
+    errinj.disable("injection4");
+}
+
 SEASTAR_TEST_CASE(test_inject_with_parameters) {
     utils::error_injection<true> errinj;
 
@@ -428,3 +503,5 @@ SEASTAR_TEST_CASE(test_inject_cql) {
         });
     });
 }
+
+BOOST_AUTO_TEST_SUITE_END()

@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "test/lib/cql_test_env.hh"
@@ -17,6 +17,7 @@
 #include "db/commitlog/commitlog.hh"
 
 #include <boost/range/irange.hpp>
+#include <fmt/ranges.h>
 #include <seastar/core/app-template.hh>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/units.hh>
@@ -155,7 +156,7 @@ void execute_reads(const schema_ptr& schema, reader_concurrency_semaphore& sem, 
             (void)with_gate(g, [reads, read, &n, concurrency] {
                 const auto start = n;
                 n = std::min(reads, n + concurrency);
-                return parallel_for_each(boost::irange(start, n), read);
+                return parallel_for_each(std::views::iota(start, n), read);
             }).handle_exception([&e, &sem, initial_res] (std::exception_ptr eptr) {
                 const auto res = sem.available_resources();
                 testlog.error("Read failed: {}", eptr);
@@ -316,8 +317,10 @@ int main(int argc, char** argv) {
         db_cfg.sstable_format(app.configuration()["sstable-format"].as<std::string>());
 
         do_with_cql_env([] (cql_test_env& env) {
-            return with_scheduling_group(env.local_db().get_statement_scheduling_group(), [&] {
-                return seastar::async([&] {
+            return get_scheduling_groups().then([&env] (auto groups) {
+                seastar::thread_attributes attr;
+                attr.sched_group = groups.statement_scheduling_group;
+                return seastar::async(std::move(attr), [&] {
                     test_main_thread(env);
                 });
             });

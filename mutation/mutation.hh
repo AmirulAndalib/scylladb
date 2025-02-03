@@ -3,16 +3,15 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
-#include <iosfwd>
-
 #include "mutation_partition.hh"
 #include "keys.hh"
 #include "schema/schema_fwd.hh"
+#include "utils/assert.hh"
 #include "utils/hashing.hh"
 #include "mutation_fragment_v2.hh"
 #include "mutation_consumer.hh"
@@ -20,9 +19,8 @@
 #include "mutation/mutation_consumer_concepts.hh"
 #include "utils/preempt.hh"
 
+#include <seastar/util/later.hh>
 #include <seastar/util/optimized_optional.hh>
-#include <seastar/core/coroutine.hh>
-#include <seastar/coroutine/maybe_yield.hh>
 
 struct mutation_consume_cookie {
     using crs_iterator_type = mutation_partition::rows_type::iterator;
@@ -187,6 +185,12 @@ public:
     size_t memory_usage(const ::schema& s) const;
 };
 
+inline std::vector<mutation> make_mutation_vector(mutation&& m) {
+    std::vector<mutation> ret;
+    ret.emplace_back(std::move(m));
+    return ret;
+}
+
 template<consume_in_reverse reverse, FlattenedConsumerV2 Consumer>
 std::optional<stop_iteration> consume_clustering_fragments(schema_ptr s, mutation_partition& partition, Consumer& consumer, mutation_consume_cookie& cookie, is_preemptible preempt = is_preemptible::no) {
     constexpr bool crs_in_reverse = reverse == consume_in_reverse::yes;
@@ -296,7 +300,7 @@ std::optional<stop_iteration> consume_clustering_fragments(schema_ptr s, mutatio
       if (crs_it == crs_end && rts_it == rts_end) {
         flush_tombstones(position_in_partition::after_all_clustered_rows());
       } else {
-        assert(preempt && need_preempt());
+        SCYLLA_ASSERT(preempt && need_preempt());
         return std::nullopt;
       }
     }
@@ -448,7 +452,7 @@ void apply(mutation& dst, const mutation_opt& src) {
 // Returns a range into partitions containing mutations covered by the range.
 // partitions must be sorted according to decorated key.
 // range must not wrap around.
-boost::iterator_range<std::vector<mutation>::const_iterator> slice(
+std::ranges::subrange<std::vector<mutation>::const_iterator> slice(
     const std::vector<mutation>& partitions,
     const dht::partition_range&);
 
@@ -456,8 +460,18 @@ boost::iterator_range<std::vector<mutation>::const_iterator> slice(
 // clustering order. The resulting mutation will contain a reverse schema too.
 mutation reverse(mutation mut);
 
-template <> struct fmt::formatter<mutation> : fmt::formatter<std::string_view> {
+template <> struct fmt::formatter<mutation> : fmt::formatter<string_view> {
     auto format(const mutation&, fmt::format_context& ctx) const -> decltype(ctx.out());
 };
 
-std::ostream& operator<<(std::ostream& os, const mutation& m);
+// Splits the source mutation into multiple mutations so that their size
+// does not exceed the max_size limit.
+// The size of a mutation is calculated as the sum of the memory_usage()
+// of its constituent mutation_fragments.
+// The function doesn't split rows into cells, one big row can
+// lead to the creation of a mutation larger than max_size.
+// Due to the difference in calculating sizes for mutations and their fragments,
+// the actual size of the output mutation may be larger than max_size. It is recommended
+// to pass half of the required value as max_size; such a margin should ensure
+// that the condition is met.
+future<> split_mutation(mutation source, std::vector<mutation>& target, size_t max_size);

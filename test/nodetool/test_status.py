@@ -1,12 +1,12 @@
 # Copyright 2024-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
 
 from collections import defaultdict
 from enum import Enum
-from rest_api_mock import expected_request
+from test.nodetool.rest_api_mock import expected_request
 from socket import getnameinfo
 from typing import NamedTuple
 
@@ -36,14 +36,19 @@ class Node(NamedTuple):
     status: NodeStatus
     state: NodeState
 
+class StatusQueryTarget(NamedTuple):
+    keyspace: str
+    table: str
+    uses_tablets: bool
 
 null_ownership_error = ("Non-system keyspaces don't have the same replication settings, "
                         "effective ownership information is meaningless")
 
 
-def validate_status_output(res, keyspace, nodes, ownership, resolve):
+def validate_status_output(res, keyspace, nodes, ownership, resolve, effective_ownership_unknown, token_count_unknown,
+                           cassandra_nodetool):
     datacenters = sorted(list(set([node.datacenter for node in nodes.values()])))
-    load_multiplier = {"KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
+    load_multiplier = {"bytes": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
 
     lines = res.split('\n')
     i = 0
@@ -81,7 +86,11 @@ def validate_status_output(res, keyspace, nodes, ownership, resolve):
 
             assert lines[i] != ""
 
-            status_state, ep, load, load_unit, tokens, owns, host_id, rack = lines[i].split()
+            pieces = tuple(lines[i].split())
+            if len(pieces) == 8:
+                status_state, ep, load, load_unit, tokens, owns, host_id, rack = pieces
+            else:
+                status_state, ep, load, tokens, owns, host_id, rack = pieces
 
             if resolve:
                 assert ep in name_to_ep
@@ -93,13 +102,26 @@ def validate_status_output(res, keyspace, nodes, ownership, resolve):
             node = nodes[ep]
 
             assert status_state == "{}{}".format(nodes[ep].status.value, nodes[ep].state.value)
-            assert load == "{:.2f}".format(int(node.load) / load_multiplier[load_unit])
-            assert int(tokens) == len(node.tokens)
-            if keyspace is None:
+            if node.load is None:
+                assert load == "?"
+            else:
+                assert load_unit is not None
+                assert load == "{:.2f}".format(int(node.load) / load_multiplier[load_unit])
+            if token_count_unknown:
+                tokens == "?"
+            else:
+                assert int(tokens) == len(node.tokens)
+            if effective_ownership_unknown:
                 assert owns == "?"
             else:
                 assert owns == "{:.1f}%".format(float(ownership[ep]) * 100)
-            assert host_id == node.host_id
+            if node.host_id is not None:
+                assert host_id == node.host_id
+            else:
+                if cassandra_nodetool:
+                    assert host_id == "null"
+                else:
+                    assert host_id == "?"
             assert rack == node.rack
 
         assert len(dc_eps) == 0
@@ -159,7 +181,18 @@ def _get_ownership(nodes):
     return ownership
 
 
-def _do_test_status(nodetool, keyspace, node_list, resolve=None):
+def _do_test_status(request, nodetool, status_query_target, node_list, resolve=None):
+    uses_cassandra_nodetool = request.config.getoption("nodetool") == "cassandra"
+
+    if status_query_target:
+        keyspace = status_query_target.keyspace
+        table = status_query_target.table
+        keyspace_uses_tablets = status_query_target.uses_tablets
+    else:
+        keyspace = None
+        table = None
+        keyspace_uses_tablets = False
+
     nodes = {node.endpoint: node for node in node_list}
 
     joining = [n.endpoint for n in node_list if n.state == NodeState.Joining]
@@ -168,9 +201,14 @@ def _do_test_status(nodetool, keyspace, node_list, resolve=None):
     live = [n.endpoint for n in node_list if n.status == NodeStatus.Up]
     down = [n.endpoint for n in node_list if n.status == NodeStatus.Down]
 
-    load_map = [{"key": ep, "value": node.load} for ep, node in nodes.items()]
+    load_map = [{"key": ep, "value": node.load} for ep, node in nodes.items() if node.load is not None]
 
-    host_id_map = [{"key": ep, "value": node.host_id} for ep, node in nodes.items()]
+    host_id_map = [{"key": ep, "value": node.host_id} for ep, node in nodes.items() if node.host_id is not None]
+
+    tokens_endpoint_params = {}
+    if keyspace_uses_tablets and table:
+        tokens_endpoint_params["keyspace"] = keyspace
+        tokens_endpoint_params["cf"] = table
 
     tokens_endpoint = []
     for ep, node in nodes.items():
@@ -186,7 +224,8 @@ def _do_test_status(nodetool, keyspace, node_list, resolve=None):
         expected_request("GET", "/storage_service/nodes/leaving", response=leaving),
         expected_request("GET", "/storage_service/nodes/moving", response=moving),
         expected_request("GET", "/storage_service/load_map", response=load_map),
-        expected_request("GET", "/storage_service/tokens_endpoint", response=tokens_endpoint),
+        expected_request("GET", "/storage_service/tokens_endpoint", params=tokens_endpoint_params,
+                         response=tokens_endpoint),
         expected_request("GET", "/gossiper/endpoint/live", response=live),
         expected_request("GET", "/gossiper/endpoint/down", response=down),
         expected_request("GET", "/storage_service/host_id", response=host_id_map),
@@ -202,8 +241,20 @@ def _do_test_status(nodetool, keyspace, node_list, resolve=None):
                 expected_request("GET", "/storage_service/ownership", multiple=expected_request.ANY,
                                  response=ownership_response)]
     else:
-        expected_requests.append(
-                expected_request("GET", f"/storage_service/ownership/{keyspace}", response=ownership_response))
+        if not uses_cassandra_nodetool:
+            keyspaces_using_tablets = [keyspace] if keyspace_uses_tablets else []
+            expected_requests.append(
+                expected_request("GET", "/storage_service/keyspaces", params={"replication": "tablets"},
+                                 multiple=expected_request.ONE, response=keyspaces_using_tablets))
+        if table is None:
+            if not keyspace_uses_tablets:
+                expected_requests.append(
+                    expected_request("GET", f"/storage_service/ownership/{keyspace}",
+                                     multiple=expected_request.ONE, response=ownership_response))
+        else:
+            expected_requests.append(
+                    expected_request("GET", f"/storage_service/ownership/{keyspace}", params={"cf": table},
+                                     response=ownership_response))
 
     for ep, node in nodes.items():
         expected_requests += [
@@ -218,15 +269,21 @@ def _do_test_status(nodetool, keyspace, node_list, resolve=None):
     if keyspace is not None:
         args.append(keyspace)
 
+    if table is not None:
+        args.append(table)
+
     if resolve is not None:
         args.append(resolve)
 
     res = nodetool(*args, expected_requests=expected_requests)
 
-    validate_status_output(res, keyspace, nodes, ownership, bool(resolve))
+    effective_ownership_unknown = keyspace is None or (table is None and keyspace_uses_tablets)
+    token_count_unknown = keyspace_uses_tablets and not table
+    validate_status_output(res.stdout, keyspace, nodes, ownership, bool(resolve), effective_ownership_unknown,
+                           token_count_unknown, uses_cassandra_nodetool)
 
 
-def test_status_no_keyspace_single_dc(nodetool):
+def test_status_no_keyspace_single_dc(request, nodetool):
     nodes = [
         Node(
             endpoint="127.0.0.1",
@@ -260,10 +317,15 @@ def test_status_no_keyspace_single_dc(nodetool):
         ),
     ]
 
-    _do_test_status(nodetool, None, nodes)
+    _do_test_status(request, nodetool, None, nodes)
 
 
-def test_status_keyspace_single_dc(nodetool):
+@pytest.mark.parametrize("uses_tablets", (False, True))
+@pytest.mark.parametrize("table", (None, "cf"))
+def test_status_keyspace_single_dc(request, nodetool, uses_tablets, table):
+    if request.config.getoption("nodetool") == "cassandra" and (uses_tablets or table):
+        pytest.skip("skipping tablets-related test with Cassandra nodetool")
+
     nodes = [
         Node(
             endpoint="127.0.0.1",
@@ -297,10 +359,11 @@ def test_status_keyspace_single_dc(nodetool):
         ),
     ]
 
-    _do_test_status(nodetool, "ks", nodes)
+    status_target = StatusQueryTarget(keyspace="ks", table=table, uses_tablets=uses_tablets)
+    _do_test_status(request, nodetool, status_target, nodes)
 
 
-def test_status_no_keyspace_multi_dc(nodetool):
+def test_status_no_keyspace_multi_dc(request, nodetool):
     nodes = [
         Node(
             endpoint="127.1.0.1",
@@ -344,10 +407,14 @@ def test_status_no_keyspace_multi_dc(nodetool):
         ),
     ]
 
-    _do_test_status(nodetool, None, nodes)
+    _do_test_status(request, nodetool, None, nodes)
 
+@pytest.mark.parametrize("uses_tablets", (False, True))
+@pytest.mark.parametrize("table", (None, "cf"))
+def test_status_keyspace_multi_dc(request, nodetool, uses_tablets, table):
+    if request.config.getoption("nodetool") == "cassandra" and (uses_tablets or table):
+        pytest.skip("skipping tablets-related test with Cassandra nodetool")
 
-def test_status_keyspace_multi_dc(nodetool):
     nodes = [
         Node(
             endpoint="127.1.0.1",
@@ -391,11 +458,12 @@ def test_status_keyspace_multi_dc(nodetool):
         ),
     ]
 
-    _do_test_status(nodetool, "ks", nodes)
+    status_target = StatusQueryTarget(keyspace="ks", table=table, uses_tablets=uses_tablets)
+    _do_test_status(request, nodetool, status_target, nodes)
 
 
 @pytest.mark.parametrize("resolve", (None, '-r', '--resolve-ip'))
-def test_status_resolve(nodetool, resolve):
+def test_status_resolve(request, nodetool, resolve):
     nodes = [
         Node(
             endpoint="127.0.0.1",
@@ -409,4 +477,41 @@ def test_status_resolve(nodetool, resolve):
         ),
     ]
 
-    _do_test_status(nodetool, None, nodes, resolve)
+    _do_test_status(request, nodetool, None, nodes, resolve)
+
+
+def test_status_with_zero_token_nodes(request, nodetool):
+    nodes = [
+        Node(
+            endpoint="127.0.0.1",
+            host_id="78a9c1d0-b341-467e-a076-9eff4cf7ffc6",
+            load=206015,
+            tokens=["-9175818098208185248", "-3983536194780899528"],
+            datacenter="datacenter1",
+            rack="rack1",
+            status=NodeStatus.Up,
+            state=NodeState.Normal,
+        ),
+        Node(
+            endpoint="127.0.0.2",
+            host_id="ed341f60-b12a-4fd4-9917-e80977ded0f9",
+            load=277624,
+            tokens=[],
+            datacenter="datacenter1",
+            rack="rack2",
+            status=NodeStatus.Up,
+            state=NodeState.Normal,
+        ),
+        Node(
+            endpoint="127.0.0.3",
+            host_id="1e77eb26-a372-4eb4-aeaa-72f224cf6b4c",
+            load=353236,
+            tokens=[],
+            datacenter="datacenter1",
+            rack="rack3",
+            status=NodeStatus.Down,
+            state=NodeState.Leaving,
+        ),
+    ]
+
+    _do_test_status(request, nodetool, None, nodes)

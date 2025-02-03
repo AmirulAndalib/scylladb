@@ -1,27 +1,26 @@
 #
 # Copyright 2023-present ScyllaDB
 #
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 
 import os
-import pytest
 import random
-import rest_api_mock
 import subprocess
 import sys
-import requests.exceptions
 import time
 from typing import NamedTuple
 
-from rest_api_mock import expected_request
+import pytest
+import requests.exceptions
+
+from test.nodetool.rest_api_mock import set_expected_requests, expected_request, get_expected_requests, \
+    get_unexpected_requests, expected_requests_manager
 
 
 def pytest_addoption(parser):
-    parser.addoption('--mode', action='store', default='dev',
-                     help='Scylla build mode to use')
     parser.addoption('--nodetool', action='store', choices=["scylla", "cassandra"], default="scylla",
-                     help="Which nodetool implementation to run the tests against")
+                     help="Which nodetool implementation to run the tests against (default: %(default)s)")
     parser.addoption('--nodetool-path', action='store', default=None,
                      help="Path to the nodetool binary,"
                      " with --nodetool=scylla, this should be the scylla binary,"
@@ -72,7 +71,7 @@ def rest_api_mock_server(request, server_address):
             # process terminated
             raise subprocess.CalledProcessError(returncode, server_process.args)
         try:
-            rest_api_mock.get_expected_requests(server_address)
+            get_expected_requests(server_address)
             break
         except requests.exceptions.ConnectionError:
             time.sleep(interval)
@@ -88,6 +87,11 @@ def rest_api_mock_server(request, server_address):
         server_process.wait()
 
 
+def _path_from_top_srcdir(*p):
+    top_srcdir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    return os.path.join(top_srcdir, *p)
+
+
 @pytest.fixture(scope="session")
 def jmx(request, rest_api_mock_server):
     if request.config.getoption("nodetool") == "scylla":
@@ -96,8 +100,7 @@ def jmx(request, rest_api_mock_server):
 
     jmx_path = request.config.getoption("jmx_path")
     if jmx_path is None:
-        jmx_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "tools", "jmx", "scripts",
-                                                "scylla-jmx"))
+        jmx_path = _path_from_top_srcdir("tools", "jmx", "scripts", "scylla-jmx")
     else:
         jmx_path = os.path.abspath(jmx_path)
 
@@ -117,7 +120,7 @@ def jmx(request, rest_api_mock_server):
                 "GET",
                 "/stream_manager/",
                 response=[])]
-    rest_api_mock.set_expected_requests(rest_api_mock_server, expected_requests)
+    set_expected_requests(rest_api_mock_server, expected_requests)
 
     # Our nodetool launcher script ignores the host param, so this has to be 127.0.0.1, matching the internal default.
     jmx_ip = "127.0.0.1"
@@ -138,7 +141,7 @@ def jmx(request, rest_api_mock_server):
     # Wait until jmx starts up
     # We rely on the expected requests being consumed for this
     i = 0
-    while len(rest_api_mock.get_expected_requests(rest_api_mock_server)) > 0:
+    while len(get_expected_requests(rest_api_mock_server)) > 0:
         if i == 50:  # 5 seconds
             raise RuntimeError("timed out waiting for JMX to start")
         time.sleep(0.1)
@@ -158,23 +161,22 @@ all_modes = {'debug': 'Debug',
 
 
 def _path_to_scylla(mode):
-    build_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "build"))
+    build_dir = _path_from_top_srcdir("build")
     if os.path.exists(os.path.join(build_dir, 'build.ninja')):
         return os.path.join(build_dir, all_modes[mode], "scylla")
     return os.path.join(build_dir, mode, "scylla")
 
 
 @pytest.fixture(scope="session")
-def nodetool_path(request):
+def nodetool_path(request, build_mode):
     if request.config.getoption("nodetool") == "scylla":
-        mode = request.config.getoption("mode")
-        return _path_to_scylla(mode)
+        return _path_to_scylla(build_mode)
 
     path = request.config.getoption("nodetool_path")
     if path is not None:
         return os.path.abspath(path)
 
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "tools", "java", "bin", "nodetool"))
+    return _path_from_top_srcdir("java", "bin", "nodetool")
 
 
 @pytest.fixture(scope="function")
@@ -188,35 +190,46 @@ def cassandra_only(request):
     if request.config.getoption("nodetool") != "cassandra":
         pytest.skip('Cassandra-only test skipped')
 
+def split_list(l, delim):
+    before = []
+    after = []
+    for elem in l:
+        (after if after or elem == delim else before).append(elem)
+    return (before, after)
 
 @pytest.fixture(scope="module")
 def nodetool(request, jmx, nodetool_path, rest_api_mock_server):
-    def invoker(method, *args, expected_requests=None):
-        if expected_requests is not None:
-            rest_api_mock.set_expected_requests(rest_api_mock_server, expected_requests)
+    def invoker(method, *args, expected_requests=None, check_return_code=True):
+        with expected_requests_manager(rest_api_mock_server, expected_requests or []):
+            before, after = split_list(list(args), "--")
+            if request.config.getoption("nodetool") == "scylla":
+                api_ip, api_port = rest_api_mock_server
+                cmd = [nodetool_path, "nodetool", method] + before + ["--logger-log-level",
+                       "scylla-nodetool=trace",
+                       "-h", api_ip,
+                       "-p", str(api_port)] + after
+            else:
+                jmx_ip, jmx_port = jmx
+                cmd = [nodetool_path, "-h", jmx_ip, "-p", str(jmx_port), method]
+                cmd += list(args)
+            suppressions_path = _path_from_top_srcdir("ubsan-suppressions.supp")
+            env = {'UBSAN_OPTIONS': f'halt_on_error=1:abort_on_error=1:suppressions={suppressions_path}',
+                   'ASAN_OPTIONS': f'disable_coredump=0:abort_on_error=1:detect_stack_use_after_return=1'}
+            res = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            sys.stdout.write(res.stdout)
+            sys.stderr.write(res.stderr)
 
-        if request.config.getoption("nodetool") == "scylla":
-            api_ip, api_port = rest_api_mock_server
-            cmd = [nodetool_path, "nodetool", method,
-                   "--logger-log-level", "scylla-nodetool=trace",
-                   "-h", api_ip,
-                   "-p", str(api_port)]
-        else:
-            jmx_ip, jmx_port = jmx
-            cmd = [nodetool_path, "-h", jmx_ip, "-p", str(jmx_port), method]
-        cmd += list(args)
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        sys.stdout.write(res.stdout)
-        sys.stderr.write(res.stderr)
+            expected_requests = [r for r in get_expected_requests(rest_api_mock_server)
+                                 if not r.exhausted()]
 
-        expected_requests = [r for r in rest_api_mock.get_expected_requests(rest_api_mock_server) if not r.exhausted()]
-        # Clear up any unconsumed requests, so the next test starts with a clean slate
-        rest_api_mock.clear_expected_requests(rest_api_mock_server)
+            unexpected_requests = get_unexpected_requests(rest_api_mock_server)
 
-        # Check the return-code first, if the command failed probably not all requests were consumed
-        res.check_returncode()
-        assert len(expected_requests) == 0, ''.join(str(r) for r in expected_requests)
+            # Check the return-code first, if the command failed probably not all requests were consumed
+            if check_return_code:
+                res.check_returncode()
+            assert len(expected_requests) == 0, ''.join(str(r) for r in expected_requests)
+            assert unexpected_requests == 0
 
-        return res.stdout
+            return res
 
     return invoker

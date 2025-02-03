@@ -1,5 +1,21 @@
 pull_request_rules:
-  - name: Automate backport pull request 5.2
+  - name: put PR in draft if conflicts
+    conditions:
+      - label = conflicts
+      - author = mergify[bot]
+      - head ~= ^mergify/
+    actions:
+      edit:
+         draft: true
+  - name: Delete mergify backport branch
+    conditions:
+      - base~=branch-
+      - or:
+        - merged
+        - closed
+    actions:
+      delete_head_branch:
+  - name: Automate backport pull request 6.2
     conditions:
       - or:
         - closed
@@ -7,22 +23,24 @@ pull_request_rules:
       - or:
           - base=master
           - base=next
-      - label=backport/5.2 # The PR must have this label to trigger the backport
+      - label=backport/6.2 # The PR must have this label to trigger the backport
       - label=promoted-to-master
     actions:
       copy:
-        title: "[Backport 5.2] {{ title }}"
+        title: "[Backport 6.2] {{ title }}"
         body: |
           {{ body }}
 
           {% for c in commits %}
           (cherry picked from commit {{ c.sha }})
           {% endfor %}
+
+          Refs #{{number}}
         branches:
-          - branch-5.2
+          - branch-6.2
         assignees:
           - "{{ author }}"
-  - name: Automate backport pull request 5.4
+  - name: Automate backport pull request 6.1
     conditions:
       - or:
         - closed
@@ -30,18 +48,45 @@ pull_request_rules:
       - or:
           - base=master
           - base=next
-      - label=backport/5.4 # The PR must have this label to trigger the backport
+      - label=backport/6.1 # The PR must have this label to trigger the backport
       - label=promoted-to-master
     actions:
       copy:
-        title: "[Backport 5.4] {{ title }}"
+        title: "[Backport 6.1] {{ title }}"
         body: |
           {{ body }}
 
           {% for c in commits %}
           (cherry picked from commit {{ c.sha }})
           {% endfor %}
+
+           Refs #{{number}}
         branches:
-          - branch-5.4
+          - branch-6.1
+        assignees:
+          - "{{ author }}"
+  - name: Automate backport pull request 6.0
+    conditions:
+      - or:
+        - closed
+        - merged
+      - or:
+          - base=master
+          - base=next
+      - label=backport/6.0 # The PR must have this label to trigger the backport
+      - label=promoted-to-master
+    actions:
+      copy:
+        title: "[Backport 6.0] {{ title }}"
+        body: |
+          {{ body }}
+
+          {% for c in commits %}
+          (cherry picked from commit {{ c.sha }})
+          {% endfor %}
+
+           Refs #{{number}}
+        branches:
+          - branch-6.0
         assignees:
           - "{{ author }}"

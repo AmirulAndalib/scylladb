@@ -1,5 +1,5 @@
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 /*
@@ -15,13 +15,14 @@
 #include <seastar/core/metrics_registration.hh>
 #include "reader_permit.hh"
 #include "utils/updateable_value.hh"
+#include "dht/i_partitioner_fwd.hh"
 
 namespace bi = boost::intrusive;
 
 using namespace seastar;
 
-class flat_mutation_reader_v2;
-using flat_mutation_reader_v2_opt = optimized_optional<flat_mutation_reader_v2>;
+class mutation_reader;
+using mutation_reader_opt = optimized_optional<mutation_reader>;
 
 /// Specific semaphore for controlling reader concurrency
 ///
@@ -123,6 +124,8 @@ public:
         uint64_t sstables_read = 0;
         // Permits waiting on something: admission, memory or execution
         uint64_t waiters = 0;
+
+        friend auto operator<=>(const stats&, const stats&) = default;
     };
 
     using permit_list_type = bi::list<
@@ -160,6 +163,7 @@ public:
 private:
     resources _initial_resources;
     resources _resources;
+    utils::observer<int> _count_observer;
 
     struct wait_queue {
         // Stores entries for permits waiting to be admitted.
@@ -187,6 +191,7 @@ private:
     size_t _max_queue_length = std::numeric_limits<size_t>::max();
     utils::updateable_value<uint32_t> _serialize_limit_multiplier;
     utils::updateable_value<uint32_t> _kill_limit_multiplier;
+    utils::updateable_value<uint32_t> _cpu_concurrency;
     stats _stats;
     std::optional<seastar::metrics::metric_groups> _metrics;
     bool _stopped = false;
@@ -198,12 +203,12 @@ private:
 
 private:
     void do_detach_inactive_reader(reader_permit::impl&, evict_reason reason) noexcept;
-    [[nodiscard]] flat_mutation_reader_v2 detach_inactive_reader(reader_permit::impl&, evict_reason reason) noexcept;
+    [[nodiscard]] mutation_reader detach_inactive_reader(reader_permit::impl&, evict_reason reason) noexcept;
     void evict(reader_permit::impl&, evict_reason reason) noexcept;
 
     bool has_available_units(const resources& r) const;
 
-    bool all_need_cpu_permits_are_awaiting() const;
+    bool cpu_concurrency_limit_reached() const;
 
     [[nodiscard]] std::exception_ptr check_queue_size(std::string_view queue_name);
 
@@ -227,6 +232,8 @@ private:
     bool should_evict_inactive_read() const noexcept;
 
     void maybe_admit_waiters() noexcept;
+
+    void maybe_wake_execution_loop() noexcept;
 
     // Request more memory for the permit.
     // Request is instantly granted while memory consumption of all reads is
@@ -252,7 +259,7 @@ private:
     std::runtime_error stopped_exception();
 
     // closes reader in the background.
-    void close_reader(flat_mutation_reader_v2 reader);
+    void close_reader(mutation_reader reader);
 
     future<> execution_loop() noexcept;
 
@@ -272,13 +279,27 @@ public:
     /// Create a semaphore with the specified limits
     ///
     /// The semaphore's name has to be unique!
-    reader_concurrency_semaphore(int count,
+    reader_concurrency_semaphore(
+            utils::updateable_value<int> count,
             ssize_t memory,
             sstring name,
             size_t max_queue_length,
             utils::updateable_value<uint32_t> serialize_limit_multiplier,
             utils::updateable_value<uint32_t> kill_limit_multiplier,
+            utils::updateable_value<uint32_t> cpu_concurrency,
             register_metrics metrics);
+
+    reader_concurrency_semaphore(
+            int count,
+            ssize_t memory,
+            sstring name,
+            size_t max_queue_length,
+            utils::updateable_value<uint32_t> serialize_limit_multiplier,
+            utils::updateable_value<uint32_t> kill_limit_multiplier,
+            register_metrics metrics)
+        : reader_concurrency_semaphore(utils::updateable_value(count), memory, std::move(name), max_queue_length,
+                std::move(serialize_limit_multiplier), std::move(kill_limit_multiplier), utils::updateable_value<uint32_t>(1), metrics)
+    { }
 
     /// Create a semaphore with practically unlimited count and memory.
     ///
@@ -296,9 +317,10 @@ public:
             size_t max_queue_length = std::numeric_limits<size_t>::max(),
             utils::updateable_value<uint32_t> serialize_limit_multipler = utils::updateable_value(std::numeric_limits<uint32_t>::max()),
             utils::updateable_value<uint32_t> kill_limit_multipler = utils::updateable_value(std::numeric_limits<uint32_t>::max()),
+            utils::updateable_value<uint32_t> cpu_concurrency = utils::updateable_value<uint32_t>(1),
             register_metrics metrics = register_metrics::no)
-        : reader_concurrency_semaphore(count, memory, std::move(name), max_queue_length, std::move(serialize_limit_multipler),
-                std::move(kill_limit_multipler), register_metrics::no)
+        : reader_concurrency_semaphore(utils::updateable_value(count), memory, std::move(name), max_queue_length, std::move(serialize_limit_multipler),
+                std::move(kill_limit_multipler), std::move(cpu_concurrency), metrics)
     {}
 
     virtual ~reader_concurrency_semaphore();
@@ -326,7 +348,7 @@ public:
     ///
     /// The semaphore takes ownership of the passed in reader for the duration
     /// of its inactivity and it may evict it to free up resources if necessary.
-    inactive_read_handle register_inactive_read(flat_mutation_reader_v2 ir) noexcept;
+    inactive_read_handle register_inactive_read(mutation_reader ir, const dht::partition_range* range = nullptr) noexcept;
 
     /// Set the inactive read eviction notification handler and optionally eviction ttl.
     ///
@@ -346,7 +368,7 @@ public:
     ///
     /// If the read was not evicted, the inactive read object, passed in to the
     /// register call, will be returned. Otherwise a nullptr is returned.
-    flat_mutation_reader_v2_opt unregister_inactive_read(inactive_read_handle irh);
+    mutation_reader_opt unregister_inactive_read(inactive_read_handle irh);
 
     /// Try to evict an inactive read.
     ///
@@ -358,7 +380,12 @@ public:
     void clear_inactive_reads();
 
     /// Evict all inactive reads the belong to the table designated by the id.
-    future<> evict_inactive_reads_for_table(table_id id) noexcept;
+    /// If a range is provided, only inactive reads whose range overlaps with the
+    /// range are evicted.
+    /// The range of the inactive read is provided in register_inactive_read().
+    /// If the range for an inactive read was not provided, all reads for the
+    /// table are evicted.
+    future<> evict_inactive_reads_for_table(table_id id, const dht::partition_range* range = nullptr) noexcept;
 private:
     // The following two functions are extension points for
     // future inheriting classes that needs to run some stop

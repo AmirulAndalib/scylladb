@@ -3,13 +3,20 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
-#include "test/lib/scylla_test_case.hh"
+#include <fmt/ranges.h>
+
+#undef SEASTAR_TESTING_MAIN
+#include <seastar/testing/test_case.hh>
 #include "test/lib/cql_test_env.hh"
 #include "db/commitlog/commitlog_replayer.hh"
 #include "db/commitlog/commitlog.hh"
+#include "db/config.hh"
+#include "db/system_keyspace.hh"
+
+BOOST_AUTO_TEST_SUITE(commitlog_cleanup_test)
 
 // Test that `canonical_token_range(tr)` contains the same tokens as `tr`.
 SEASTAR_TEST_CASE(test_canonical_token_range) {
@@ -114,7 +121,7 @@ SEASTAR_TEST_CASE(test_commitlog_cleanups) {
     auto cfg = cql_test_config();
     cfg.db_config->auto_snapshot.set(false);
     cfg.db_config->commitlog_sync.set("batch");
-    cfg.db_config->experimental_features.set({db::experimental_features_t::feature::TABLETS});
+    cfg.db_config->enable_tablets.set(true);
     cfg.initial_tablets = 1;
 
     return do_with_cql_env_thread([](cql_test_env& e) {
@@ -133,7 +140,7 @@ SEASTAR_TEST_CASE(test_commitlog_cleanups) {
 
         // Cleanup the tablet.
         e.db().invoke_on_all([&] (replica::database& db) {
-            return db.find_column_family("ks", "cf").cleanup_tablet(db, e.get_system_keyspace().local(), locator::tablet_id(0));
+            return db.find_column_family("ks", "cf").cleanup_tablet_without_deallocation(db, e.get_system_keyspace().local(), locator::tablet_id(0));
         }).get();
         BOOST_REQUIRE_EQUAL(get_num_rows(), 0);
 
@@ -166,7 +173,7 @@ SEASTAR_TEST_CASE(test_commitlog_cleanup_record_gc) {
     auto cfg = cql_test_config();
     cfg.db_config->auto_snapshot.set(false);
     cfg.db_config->commitlog_sync.set("batch");
-    cfg.db_config->experimental_features.set({db::experimental_features_t::feature::TABLETS});
+    cfg.db_config->enable_tablets.set(true);
     cfg.initial_tablets = 1;
 
     return do_with_cql_env_thread([](cql_test_env& e) {
@@ -178,7 +185,7 @@ SEASTAR_TEST_CASE(test_commitlog_cleanup_record_gc) {
         };
         auto cleanup_tablet = [&] (std::string cf) {
             auto& db = e.local_db();
-            db.find_column_family("ks", cf).cleanup_tablet(db, e.get_system_keyspace().local(), locator::tablet_id(0)).get();
+            db.find_column_family("ks", cf).cleanup_tablet_without_deallocation(db, e.get_system_keyspace().local(), locator::tablet_id(0)).get();
         };
         auto get_num_records = [&] {
             auto res = e.execute_cql("select * from system.commitlog_cleanups;").get();
@@ -216,3 +223,5 @@ SEASTAR_TEST_CASE(test_commitlog_cleanup_record_gc) {
         BOOST_REQUIRE_EQUAL(get_num_records(), 1);
     }, cfg);
 }
+
+BOOST_AUTO_TEST_SUITE_END()

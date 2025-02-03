@@ -3,18 +3,21 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #define BOOST_TEST_MODULE core
 
 #include <boost/test/unit_test.hpp>
 #include "boost/icl/interval_map.hpp"
-#include <unordered_set>
+#include <fmt/ranges.h>
+#include <fmt/std.h>
+#include <fmt/ranges.h>
 
 #include "schema/schema_builder.hh"
-
 #include "locator/token_metadata.hh"
+#include "utils/to_string.hh"
+#include "test/lib/test_utils.hh"
 
 // yuck, but what can one do?  needed for BOOST_REQUIRE_EQUAL
 namespace std {

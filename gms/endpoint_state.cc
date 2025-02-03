@@ -5,16 +5,18 @@
  */
 
 /*
- * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
+ * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
 #include "gms/endpoint_state.hh"
 #include "gms/i_endpoint_state_change_subscriber.hh"
-#include <optional>
-#include <ostream>
+#include <seastar/core/on_internal_error.hh>
 #include <boost/lexical_cast.hpp>
+#include "utils/log.hh"
 
 namespace gms {
+
+logging::logger logger("endpoint_state");
 
 static_assert(std::is_default_constructible_v<heart_beat_state>);
 static_assert(std::is_nothrow_copy_constructible_v<heart_beat_state>);
@@ -34,11 +36,6 @@ const versioned_value* endpoint_state::get_application_state_ptr(application_sta
     }
 }
 
-std::ostream& operator<<(std::ostream& os, const endpoint_state& x) {
-    fmt::print(os, "{}", x);
-    return os;
-}
-
 bool endpoint_state::is_cql_ready() const noexcept {
     auto* app_state = get_application_state_ptr(application_state::RPC_READY);
     if (!app_state) {
@@ -52,10 +49,34 @@ bool endpoint_state::is_cql_ready() const noexcept {
 }
 
 locator::host_id endpoint_state::get_host_id() const noexcept {
+    locator::host_id host_id;
     if (auto app_state = get_application_state_ptr(application_state::HOST_ID)) {
-        return locator::host_id(utils::UUID(app_state->value()));
+        host_id = locator::host_id(utils::UUID(app_state->value()));
+        if (!host_id) {
+            on_internal_error_noexcept(logger, format("Node has null host_id"));
+        }
     }
-    return locator::host_id::create_null_id();
+    return host_id;
+}
+
+std::optional<locator::endpoint_dc_rack> endpoint_state::get_dc_rack() const {
+    if (const auto* dc_state = get_application_state_ptr(application_state::DC)) {
+        const auto* rack_state = get_application_state_ptr(application_state::RACK);
+        if (dc_state->value().empty() || !rack_state || rack_state->value().empty()) {
+            on_internal_error_noexcept(logger, format("Node {} has empty dc={} or rack={}", get_host_id(), dc_state->value(), rack_state ? rack_state->value() : "(null)"));
+        } else {
+            return std::make_optional<locator::endpoint_dc_rack>(dc_state->value(), rack_state->value());
+        }
+    }
+    return std::nullopt;
+}
+
+std::unordered_set<dht::token> endpoint_state::get_tokens() const {
+    std::unordered_set<dht::token> ret;
+    if (auto app_state = get_application_state_ptr(application_state::TOKENS)) {
+        ret = versioned_value::tokens_from_string(app_state->value());
+    }
+    return ret;
 }
 
 future<> i_endpoint_state_change_subscriber::on_application_state_change(inet_address endpoint,

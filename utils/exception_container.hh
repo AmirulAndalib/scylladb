@@ -3,20 +3,16 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #pragma once
 
 #include <exception>
-#include <typeinfo>
 #include <type_traits>
 #include <memory>
-#include <ostream>
 #include <variant>
 #include <seastar/core/future.hh>
-#include <seastar/core/distributed.hh>
-#include <seastar/util/log.hh>
 #include "utils/variant_element.hh"
 
 namespace utils {
@@ -152,7 +148,7 @@ concept ExceptionContainer = is_exception_container<T>::value;
 
 }
 
-template <typename... Exs> struct fmt::formatter<utils::exception_container<Exs...>> : fmt::formatter<std::string_view> {
+template <typename... Exs> struct fmt::formatter<utils::exception_container<Exs...>> : fmt::formatter<string_view> {
     auto format(const auto& ec, fmt::format_context& ctx) const {
         auto out = ctx.out();
         ec.accept([&out] (const auto& ex) { out = fmt::format_to(out, "{}", ex); });

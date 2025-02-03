@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
 #include "cql3/type_json.hh"
@@ -171,13 +171,15 @@ static bytes from_json_object_aux(const map_type_impl& t, const rjson::value& va
     std::map<bytes, bytes, serialized_compare> raw_map(t.get_keys_type()->as_less_comparator());
     for (auto it = value.MemberBegin(); it != value.MemberEnd(); ++it) {
         bytes value = from_json_object(*t.get_values_type(), it->value);
-        if (t.get_keys_type()->underlying_type() == ascii_type ||
-            t.get_keys_type()->underlying_type() == utf8_type) {
+        // For all native (non-collection, non-tuple) key types, they are
+        // represented as a string in JSON. For more elaborate types, they
+        // can also be a string representation of another JSON type, which
+        // needs to be reparsed as JSON. For example,
+        // map<frozen<list<int>>, int> will be represented as:
+        // { "[1, 3, 6]": 3, "[]": 0, "[1, 2]": 2 }
+        if (t.get_keys_type()->underlying_type()->is_native()) {
             raw_map.emplace(from_json_object(*t.get_keys_type(), it->name), std::move(value));
         } else {
-            // Keys in maps can only be strings in JSON, but they can also be a string representation
-            // of another JSON type, which needs to be reparsed. Example - map<frozen<list<int>>, int>
-            // will be represented like this: { "[1, 3, 6]": 3, "[]": 0, "[1, 2]": 2 }
             try {
                 rjson::value map_key = rjson::parse(rjson::to_string_view(it->name));
                 raw_map.emplace(from_json_object(*t.get_keys_type(), map_key), std::move(value));
@@ -251,7 +253,7 @@ static bytes from_json_object_aux(const user_type_impl& ut, const rjson::value& 
     }
 
     if (!remaining_names.empty()) {
-        throw marshal_exception(format(
+        throw marshal_exception(seastar::format(
                 "Extraneous field definition for user type {}: {}", ut.get_name_as_string(), *remaining_names.begin()));
     }
     return ut.build_value(std::move(raw_tuple));
